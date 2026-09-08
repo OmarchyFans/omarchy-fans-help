@@ -990,8 +990,10 @@ REFUSE = [
      "recursive rm is never run from the help panel"),
     (r"-exec(dir)?\s+(/[\w/]*/)?(rm|shred|dd|mkfs|chmod|chown)(\s|$)",
      "find -exec with a destructive command is never run from the help panel"),
-    (r"\|\s*xargs\s+(-[\w-]+\s+)*(rm|shred|chmod|chown)(\s|$)",
+    (r"\|\s*xargs\b[^;&|]*?(^|\s)(/[\w/]*/)?(rm|shred|chmod|chown|dd|mkfs)(\s|$)",
      "xargs into a destructive command is never run from the help panel"),
+    (r"(?i)(^|[\s;&|(`$/])(sudo\s+)?(sh|bash|zsh|fish|dash|ksh|python3?|perl|ruby|node)\s+(-[A-Za-z]*[ce]|--command|--eval)(\s|$)",
+     "handing a step to an interpreter is never done from the help panel"),
     (r"(^|[\s;&|(`$])dd(\s|$)", "dd is never run from the help panel"),
     (r"(^|[\s;&|(`$])mkfs(\.|\s|$)", "mkfs is never run from the help panel"),
     (r"(^|[\s;&|(`$])(reboot|shutdown|poweroff|halt)(\s|$)", "power commands are never run from the help panel"),
@@ -1171,10 +1173,13 @@ def command_policy(cmd, db=None):
     c = " ".join(cmd.strip().split())
     if not c:
         return {"verdict": "refuse", "reason": "empty command"}
+    # Match on a copy with quotes and backslashes removed: 'rm' -rf, "rm" -rf
+    # and \rm -rf are the same command to the shell.
+    bare = re.sub(r"[\\'\"]", "", c)
     for pat, why in REFUSE:
-        if re.search(pat, c):
+        if re.search(pat, c) or re.search(pat, bare):
             return {"verdict": "refuse", "reason": why}
-    why = recursive_perm_target(c)
+    why = recursive_perm_target(c) or recursive_perm_target(bare)
     if why:
         return {"verdict": "refuse", "reason": why}
     if "<" in c:

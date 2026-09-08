@@ -48,6 +48,16 @@ The user chose this model, and it applies to every execution path: an
   A "run" verdict also requires a plain argument string: any shell syntax
   (`;`, `&&`, `|`, `$(…)`, backticks, redirections) drops it to the prompt.
 
+What keeps this safe is the shape, not the pattern list: nothing runs without
+an explicit click; one-click run is limited to indexed omarchy routes with
+plain arguments; everything else degrades to an editable prompt the user
+reads first. The refuse list defends against model mistakes and foot-guns,
+not against an adversary. A string matcher over shell text cannot be made
+complete (any interpreter can destroy anything without naming a dangerous
+command, which is why interpreters given `-c`/`-e` are refused outright), and
+there is no untrusted input channel here: the model is local and the manual
+is pinned to a tag of the official repository.
+
 Chat answers list the commands they contain as separate "Run" buttons, one
 click per step. Under each button the panel shows the verdict, what the
 command reads and writes, and, when the model filled in a `<placeholder>`
