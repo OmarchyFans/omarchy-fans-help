@@ -1,0 +1,467 @@
+#!/usr/bin/env python3
+"""Build the retrieval index for the local Omarchy agent.
+
+Three corpora, two retrieval shapes:
+
+  binds, commands  -> exact-match lookups. FTS5/BM25 answers these directly;
+                      the model never sees the manual for them.
+  manual sections  -> prose. Indexed for PageIndex navigation, where the model
+                      picks a section id from a cached outline and we return
+                      that section verbatim.
+
+The manual is pinned to the git tag matching the installed `omarchy version`,
+so the agent never describes a keybinding this machine does not have.
+"""
+
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+
+HOME = os.path.expanduser("~")
+ROOT = os.path.join(HOME, ".local/share/omarchy-local-agent")
+MANUAL = os.path.join(ROOT, "manual")
+DB = os.path.join(ROOT, "index.db")
+TOC = os.path.join(ROOT, "toc.json")
+SKILL_DOCS = "/usr/share/omarchy/default/agents/skills/omarchy"
+REPO = "https://github.com/omacom/omarchy"
+
+
+# Omarchy ships ~230 default bindings; anything near zero means the extraction
+# tool was crippled by its environment, not that the user unbound everything.
+MIN_PLAUSIBLE_BINDS = 20
+
+HYPHENATED = re.compile(r"\b[\w]+(?:-[\w]+)+\b")
+
+
+def dehyphenate(text):
+    """Collect de-hyphenated forms of hyphenated compounds, deduplicated.
+
+    "Wi-Fi" -> "wifi", "night-light" -> "nightlight". Only the joined form is
+    emitted; the original stays searchable through the normal columns.
+    """
+    found = {m.group(0).replace("-", "").lower() for m in HYPHENATED.finditer(text)}
+    return " ".join(sorted(found))
+
+
+def run(cmd, **kw):
+    """Run a command, returning stdout or None if it fails."""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=120, **kw)
+        return r.stdout if r.returncode == 0 else None
+    except (subprocess.SubprocessError, OSError):
+        return None
+
+
+# --------------------------------------------------------------------------
+# corpus 1: the manual, pinned to the installed version
+# --------------------------------------------------------------------------
+
+def installed_version():
+    out = run(["omarchy", "version"])
+    if not out:
+        return None
+    m = re.search(r"(\d+\.\d+\.\d+)", out)
+    return m.group(1) if m else None
+
+
+def resolve_ref():
+    """Prefer the tag matching this install; fall back to master with a warning.
+
+    "could not reach the remote" and "the remote has no such tag" need different
+    messages: conflating them tells someone their version was never tagged when
+    the truth is their network is down, which sends them after the wrong bug.
+    """
+    ver = installed_version()
+    if ver:
+        tags = run(["git", "ls-remote", "--tags", REPO])
+        if tags is None:
+            print("  ! could not reach the manual remote (offline?); "
+                  "keeping whatever manual is already on disk", file=sys.stderr)
+            return None, ver
+        if f"refs/tags/v{ver}" in tags:
+            return f"v{ver}", ver
+        print(f"  ! no tag v{ver} published; falling back to master", file=sys.stderr)
+    return "master", ver
+
+
+def fetch_manual():
+    ref, ver = resolve_ref()
+    if ref is None:
+        # Remote unreachable; resolve_ref already explained why.
+        return None
+    print(f"  manual ref: {ref}" + (f" (installed {ver})" if ver else ""))
+
+    tmp = tempfile.mkdtemp(prefix="omarchy-manual-")
+    try:
+        # Generous timeouts: this normally takes ~5s, but a saturated link
+        # (or a slow mirror) must degrade to "keep the existing manual", never
+        # to a crashed rebuild that leaves no index at all.
+        clone = subprocess.run(
+            ["git", "clone", "--depth", "1", "--branch", ref,
+             "--filter=blob:none", "--sparse", REPO, tmp],
+            capture_output=True, text=True, timeout=600,
+        )
+        if clone.returncode != 0:
+            print(f"  ! clone failed: {clone.stderr.strip()[:200]}", file=sys.stderr)
+            return None
+        sparse = subprocess.run(["git", "sparse-checkout", "set", "manual"],
+                                cwd=tmp, capture_output=True, text=True, timeout=600)
+        if sparse.returncode != 0:
+            print(f"  ! sparse-checkout failed: {sparse.stderr.strip()[:200]}",
+                  file=sys.stderr)
+            return None
+
+        src = os.path.join(tmp, "manual")
+        if not os.path.isdir(src):
+            print("  ! no manual/ in repo at this ref", file=sys.stderr)
+            return None
+
+        # Only replace the live copy once we know the new one is good.
+        if os.path.isdir(MANUAL):
+            shutil.rmtree(MANUAL)
+        shutil.copytree(src, MANUAL)
+
+        n = len([f for f in os.listdir(MANUAL) if f.endswith(".md")])
+        print(f"  manual: {n} markdown files")
+        return ref
+    except subprocess.TimeoutExpired as e:
+        print(f"  ! timed out fetching manual ({e.cmd[1] if len(e.cmd) > 1 else 'git'})",
+              file=sys.stderr)
+        return None
+    except OSError as e:
+        print(f"  ! could not fetch manual: {e}", file=sys.stderr)
+        return None
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# A section is injected whole, so it has to fit the per-query budget. Sections
+# above this get subdivided at the next available boundary.
+MAX_SECTION = 4000
+
+
+def _split_on(text, pattern):
+    """Split into (heading, body) on a heading regex, keeping any preamble."""
+    parts = re.split(pattern, text, flags=re.MULTILINE)
+    out = []
+    preamble = parts[0].strip()
+    if preamble:
+        out.append((None, preamble))
+    for i in range(1, len(parts), 2):
+        body = parts[i + 1].strip() if i + 1 < len(parts) else ""
+        if body:
+            out.append((parts[i].strip(), body))
+    return out
+
+
+def _split_paragraphs(heading, body):
+    """Last resort for a long run of prose under no sub-heading: pack whole
+    paragraphs into chunks so we never cut mid-sentence."""
+    chunks, cur = [], ""
+    for para in body.split("\n\n"):
+        if cur and len(cur) + len(para) + 2 > MAX_SECTION:
+            chunks.append(cur.strip())
+            cur = para
+        else:
+            cur = f"{cur}\n\n{para}" if cur else para
+    if cur.strip():
+        chunks.append(cur.strip())
+    if len(chunks) == 1:
+        return [(heading, chunks[0])]
+    return [(f"{heading} ({i + 1}/{len(chunks)})" if heading else None, c)
+            for i, c in enumerate(chunks)]
+
+
+def split_sections(text):
+    """Split a chapter on H2, then H3, then paragraphs — descending only as far
+    as size requires. Most sections stop at H2."""
+    out = []
+    for heading, body in _split_on(text, r"^##\s+(.+)$"):
+        if len(body) <= MAX_SECTION:
+            out.append((heading, body))
+            continue
+
+        sub = _split_on(body, r"^###\s+(.+)$")
+        if len(sub) > 1:
+            for subhead, subbody in sub:
+                title = subhead or heading
+                if len(subbody) > MAX_SECTION:
+                    out.extend(_split_paragraphs(title, subbody))
+                else:
+                    out.append((title, subbody))
+        else:
+            out.extend(_split_paragraphs(heading, body))
+    return out
+
+
+def read_manual():
+    """Yield section rows plus the outline used as the PageIndex TOC."""
+    sections, outline = [], []
+    if not os.path.isdir(MANUAL):
+        return sections, outline
+
+    for fn in sorted(f for f in os.listdir(MANUAL) if f.endswith(".md")):
+        path = os.path.join(MANUAL, fn)
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+
+        chapter_id = fn[:-3]
+        m = re.search(r"^#\s+(.+)$", text, flags=re.MULTILINE)
+        chapter = m.group(1).strip() if m else chapter_id.replace("-", " ")
+        # Drop the H1 so it doesn't land inside the first section's body.
+        text = re.sub(r"^#\s+.+$", "", text, count=1, flags=re.MULTILINE)
+
+        headings = []
+        for idx, (heading, body) in enumerate(split_sections(text)):
+            sid = f"{chapter_id}#{idx}"
+            sections.append({
+                "id": sid,
+                "chapter_id": chapter_id,
+                "chapter": chapter,
+                "heading": heading or chapter,
+                "body": body,
+                "source": f"manual/{fn}",
+            })
+            # Chapters with no sub-headings still need a selectable id, or the
+            # model can see them in the outline and have nothing to point at.
+            headings.append({"id": sid, "title": heading or "overview"})
+
+        outline.append({"chapter_id": chapter_id, "chapter": chapter,
+                        "sections": headings})
+
+    # The packaged skill docs cover config details the manual skips.
+    if os.path.isdir(SKILL_DOCS):
+        for fn in sorted(f for f in os.listdir(SKILL_DOCS) if f.endswith(".md")):
+            path = os.path.join(SKILL_DOCS, fn)
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+            chapter_id = f"skill-{fn[:-3]}"
+            chapter = f"Skill reference: {fn[:-3]}"
+            headings = []
+            for idx, (heading, body) in enumerate(split_sections(text)):
+                sid = f"{chapter_id}#{idx}"
+                sections.append({
+                    "id": sid, "chapter_id": chapter_id, "chapter": chapter,
+                    "heading": heading or chapter, "body": body,
+                    "source": f"{SKILL_DOCS}/{fn}",
+                })
+                if heading:
+                    headings.append({"id": sid, "title": heading})
+            outline.append({"chapter_id": chapter_id, "chapter": chapter,
+                            "sections": headings})
+
+    return sections, outline
+
+
+# --------------------------------------------------------------------------
+# corpus 2: keybindings
+# --------------------------------------------------------------------------
+
+def read_binds():
+    """`omarchy menu keybindings --print` resolves Omarchy's __lua dispatchers
+    that raw `hyprctl binds -j` reports opaquely. Fall back to hyprctl."""
+    binds = []
+    out = run(["omarchy", "menu", "keybindings", "--print"])
+    if out:
+        for line in out.splitlines():
+            if "→" not in line:
+                continue
+            keys, _, desc = line.partition("→")
+            keys, desc = keys.strip(), desc.strip()
+            if keys and desc:
+                binds.append({"keys": keys, "description": desc, "dispatcher": ""})
+
+    # A non-empty result is NOT proof of a good one. Run under a stripped PATH
+    # (as a hook during `omarchy update` may well be) this command still exits
+    # 0 but yields a couple of lines, and accepting that silently drops ~229
+    # keybindings from the index with no error anywhere.
+    if len(binds) >= MIN_PLAUSIBLE_BINDS:
+        print(f"  binds: {len(binds)} (omarchy menu keybindings --print)")
+        return binds
+    if binds:
+        print(f"  ! only {len(binds)} binds from `omarchy menu keybindings "
+              f"--print` (expected >{MIN_PLAUSIBLE_BINDS}); falling back to hyprctl",
+              file=sys.stderr)
+        binds = []
+
+    raw = run(["hyprctl", "binds", "-j"])
+    if raw:
+        try:
+            mods = ((64, "SUPER"), (8, "ALT"), (4, "CTRL"), (1, "SHIFT"))
+            for b in json.loads(raw):
+                if not b.get("description"):
+                    continue
+                names = [n for bit, n in mods if b.get("modmask", 0) & bit]
+                keys = " + ".join(names + [b.get("key", "")]).strip(" +")
+                binds.append({"keys": keys, "description": b["description"],
+                              "dispatcher": b.get("dispatcher", "")})
+            print(f"  binds: {len(binds)} (hyprctl fallback)")
+        except (json.JSONDecodeError, TypeError) as e:
+            print(f"  ! could not parse hyprctl binds: {e}", file=sys.stderr)
+    return binds
+
+
+# --------------------------------------------------------------------------
+# corpus 3: the omarchy CLI
+# --------------------------------------------------------------------------
+
+def read_commands():
+    raw = run(["omarchy", "commands", "--json"])
+    if not raw:
+        print("  ! omarchy commands --json failed", file=sys.stderr)
+        return []
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"  ! bad JSON from omarchy commands: {e}", file=sys.stderr)
+        return []
+
+    cmds = []
+    for c in data.get("commands", []):
+        if c.get("hidden"):
+            continue
+        cmds.append({
+            "route": c.get("route", ""),
+            "summary": c.get("summary", ""),
+            "args": c.get("args", "") or "",
+            "group": c.get("group", "") or "",
+            "examples": " ; ".join(c.get("examples") or []),
+        })
+    print(f"  commands: {len(cmds)}")
+    return cmds
+
+
+# --------------------------------------------------------------------------
+# index
+# --------------------------------------------------------------------------
+
+SCHEMA = """
+DROP TABLE IF EXISTS binds;
+DROP TABLE IF EXISTS commands;
+DROP TABLE IF EXISTS sections;
+DROP TABLE IF EXISTS meta;
+
+-- Porter stemming matters more than it looks: without it "record my screen"
+-- misses the chapter titled "Recording", and "resets my bar" misses "reset".
+CREATE VIRTUAL TABLE binds USING fts5(
+    keys, description, dispatcher,
+    tokenize = 'porter unicode61'
+);
+CREATE VIRTUAL TABLE commands USING fts5(
+    route, summary, args, examples, grp,
+    tokenize = 'porter unicode61'
+);
+-- `alt` holds de-hyphenated forms of hyphenated compounds found in the text.
+-- unicode61 splits "Wi-Fi" into "wi" + "fi", so a user typing the far more
+-- common "wifi" matches nothing at all. Indexing "wifi" alongside fixes that,
+-- and generalises to every hyphenated term without a hand-written synonym list.
+CREATE VIRTUAL TABLE sections USING fts5(
+    sid UNINDEXED, chapter, heading, body, alt, source UNINDEXED,
+    tokenize = 'porter unicode61'
+);
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
+"""
+
+
+def previous_counts():
+    """Corpus sizes from the last good build, for the collapse check."""
+    if not os.path.exists(DB):
+        return {}
+    try:
+        db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+        rows = dict(db.execute("SELECT key, value FROM meta"))
+        db.close()
+    except sqlite3.Error:
+        return {}
+    out = {}
+    for name in ("binds", "commands", "sections"):
+        try:
+            out[name] = int(rows[f"n_{name}"])
+        except (KeyError, ValueError):
+            pass
+    return out
+
+
+def build():
+    os.makedirs(ROOT, exist_ok=True)
+    print("building omarchy-local-agent index")
+
+    # Remember what the last good build used, so a failed fetch reports the ref
+    # of the manual we are actually still serving rather than "unknown".
+    prev_ref = None
+    if os.path.exists(DB):
+        try:
+            old = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+            row = old.execute("SELECT value FROM meta WHERE key='manual_ref'").fetchone()
+            prev_ref = row[0] if row else None
+            old.close()
+        except sqlite3.Error:
+            pass
+
+    ref = fetch_manual()
+    if ref is None and os.path.isdir(MANUAL):
+        ref = prev_ref
+        print(f"  keeping existing manual ({ref or 'unknown ref'})")
+    sections, outline = read_manual()
+    binds = read_binds()
+    commands = read_commands()
+    print(f"  sections: {len(sections)}")
+
+    # Last line of defence. A rebuild that collapses one of the corpora would
+    # leave a working-looking agent that has quietly forgotten how to answer a
+    # whole class of question, so refuse to overwrite a healthy index with it.
+    prev = previous_counts()
+    for name, new in (("binds", len(binds)), ("commands", len(commands)),
+                      ("sections", len(sections))):
+        old = prev.get(name)
+        if old and new < old // 2:
+            print(f"\n  ! REFUSING to rebuild: {name} collapsed {old} -> {new}.\n"
+                  f"    The existing index is left untouched. This usually means a\n"
+                  f"    tool the builder depends on was missing from PATH.",
+                  file=sys.stderr)
+            return 1
+
+    db = sqlite3.connect(DB)
+    db.executescript(SCHEMA)
+
+    db.executemany(
+        "INSERT INTO binds (keys, description, dispatcher) VALUES (?,?,?)",
+        [(b["keys"], b["description"], b["dispatcher"]) for b in binds])
+    db.executemany(
+        "INSERT INTO commands (route, summary, args, examples, grp) VALUES (?,?,?,?,?)",
+        [(c["route"], c["summary"], c["args"], c["examples"], c["group"])
+         for c in commands])
+    db.executemany(
+        "INSERT INTO sections (sid, chapter, heading, body, alt, source) "
+        "VALUES (?,?,?,?,?,?)",
+        [(s["id"], s["chapter"], s["heading"], s["body"],
+          dehyphenate(f"{s['chapter']} {s['heading']} {s['body']}"), s["source"])
+         for s in sections])
+
+    db.executemany("INSERT INTO meta (key, value) VALUES (?,?)", [
+        ("manual_ref", ref or "unknown"),
+        ("omarchy_version", installed_version() or "unknown"),
+        ("n_binds", str(len(binds))),
+        ("n_commands", str(len(commands))),
+        ("n_sections", str(len(sections))),
+    ])
+    db.commit()
+    db.close()
+
+    with open(TOC, "w", encoding="utf-8") as fh:
+        json.dump(outline, fh, indent=1)
+
+    # The outline goes in the cached system prompt, so its size is the one
+    # number that decides whether PageIndex navigation is affordable.
+    approx = os.path.getsize(TOC) // 4
+    print(f"\nindex: {DB}")
+    print(f"toc:   {TOC}  (~{approx:,} tokens as raw JSON)")
+
+
+if __name__ == "__main__":
+    sys.exit(build() or 0)

@@ -1,0 +1,756 @@
+#!/usr/bin/env python3
+"""Local, offline Omarchy assistant.
+
+Two retrieval paths, chosen by what the question actually is:
+
+  FAST   "what's the keybind for X", "which command does Y"
+         BM25 over the binds/commands tables answers directly. The card IS the
+         answer, so no model runs. Sub-second, and it cannot hallucinate a
+         keybinding that does not exist on this machine.
+
+  PROSE  "how do I ...", "why does ..."
+         PageIndex: the model reads a cached outline of the manual, names one
+         section, we hand back that section verbatim, it answers from that.
+         Two calls, the first nearly free because the prefix is cached.
+
+No network at query time. The index is built by omarchy-local-agent-index.
+"""
+
+import argparse
+import json
+import os
+import re
+import sqlite3
+import sys
+import textwrap
+import time
+import urllib.error
+import urllib.request
+
+HOME = os.path.expanduser("~")
+ROOT = os.path.join(HOME, ".local/share/omarchy-local-agent")
+DB = os.path.join(ROOT, "index.db")
+TOC = os.path.join(ROOT, "toc.json")
+CONFIG = os.path.join(HOME, ".config/omarchy-local-agent/config.json")
+
+DEFAULTS = {
+    "server": "http://127.0.0.1:8080",
+    "timeout": 180,
+    # Injection budget in characters. Derived from measured prefill speed by
+    # the bake-off, not guessed: cap = target_ttft_seconds * pp_tokens_per_sec.
+    "max_inject_chars": 4000,
+    # BM25 scores are negative; lower is a better match. A fast-path hit must
+    # be at least this good, and must beat the best manual section by this
+    # margin, before we answer without consulting the manual at all.
+    # Tuned against eval.py's CASES; see README. Overridden by config.json.
+    "fast_path_max_score": -6.0,
+    "fast_path_margin": 1.0,
+    "temperature": 0.2,
+    "max_tokens": 400,
+}
+
+ANSI = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+
+def c(text, code):
+    return f"\033[{code}m{text}\033[0m" if ANSI else text
+
+
+def load_config():
+    cfg = dict(DEFAULTS)
+    try:
+        with open(CONFIG, encoding="utf-8") as fh:
+            cfg.update(json.load(fh))
+    except (OSError, json.JSONDecodeError):
+        pass
+    return cfg
+
+
+# --------------------------------------------------------------------------
+# retrieval
+# --------------------------------------------------------------------------
+
+STOPWORDS = {
+    "how", "do", "i", "the", "a", "an", "to", "in", "on", "my", "is", "what",
+    "whats", "for", "of", "can", "does", "with", "and", "it", "me", "you",
+    "please", "get", "make", "use", "using", "when", "where", "which", "that",
+    # Intent markers. classify() reads these off the raw query; leaving them in
+    # the search actively hurts, because "command to update omarchy" then ranks
+    # routes whose summary says "command" above `omarchy update` itself.
+    "command", "commands", "keybind", "keybinds", "keybinding", "keybindings",
+    "hotkey", "hotkeys", "shortcut", "shortcuts", "key", "keys", "bind",
+    "binding", "bound", "press",
+}
+
+# "omarchy" prefixes every command route, so it carries no signal there and
+# skews short-field scoring. It stays meaningful elsewhere, though -- the bind
+# described "Omarchy menu" is found by exactly that word.
+TABLE_STOPWORDS = {"commands": {"omarchy"}}
+
+
+def terms(query, table=None):
+    """FTS5 MATCH is a query language, so raw user input cannot go in. Reduce to
+    bare word tokens and quote each one."""
+    drop = STOPWORDS | TABLE_STOPWORDS.get(table, set())
+    words = re.findall(r"[A-Za-z0-9_.+-]+", query.lower())
+    kept = [w for w in words if w not in drop and len(w) > 1]
+    return kept or words
+
+
+def match_expr(query, table=None, prefix=False):
+    """Build an FTS5 MATCH expression.
+
+    prefix=True is for live search, where the user is mid-word: the last token
+    becomes a prefix query so "night" finds "nightlight" on the fifth keystroke
+    rather than only once the whole word is typed.
+    """
+    t = terms(query, table)
+    if not t:
+        return None
+    parts = [f'"{w}"' for w in t[:-1]]
+    parts.append(f'"{t[-1]}"*' if prefix else f'"{t[-1]}"')
+    return " OR ".join(parts)
+
+
+# BM25 scores are negative (lower = better), so a positive penalty demotes and a
+# negative bonus promotes. Both are small on purpose: a clearly better section
+# should still win on its own merits.
+SKILL_DOC_PENALTY = 2.0
+
+# There is deliberately no "overview section" bonus here. 23 of 51 manual
+# chapters have no "##" headings and become one long section that BM25 length
+# normalisation buries, so promoting them looked obviously right. Measured, it
+# was not: at the magnitude that helped the held-out set (+1 case) it pushed
+# whole-chapter overviews from 33% to 80% of all candidate slots and regressed
+# a case that had been passing. The real fix for that symptom turned out to be
+# the wider fetch pool below. Left documented so it is not "fixed" again.
+
+
+def dedupe_by_chapter(sections):
+    """Keep only each chapter's best-scoring section.
+
+    Without this the candidate slate collapses: `46-faq` alone took two of three
+    slots on several queries, because its many short entries win on BM25 length
+    normalisation and crowd out the chapter that actually answers. PageIndex
+    navigation wants a diverse slate of chapters to choose between, not three
+    views of the same one.
+    """
+    seen, out = set(), []
+    for s in sections:
+        chapter = s["sid"].split("#")[0]
+        if chapter in seen:
+            continue
+        seen.add(chapter)
+        out.append(s)
+    return out
+
+# One weight per column, in declared order. A hit in a heading says far more
+# about relevance than the same word buried in body prose.
+WEIGHTS = {
+    #          keys desc dispatcher
+    "binds":    (3.0, 8.0, 1.0),
+    #          route summary args examples grp
+    #  examples are demoted hard: they quote theme names, paths and sample
+    #  arguments, so `omarchy theme set` matches "night" purely because one of
+    #  its examples is "Tokyo Night". Real signal, useless answer.
+    "commands": (8.0, 5.0, 1.0, 0.4, 1.0),
+    #          sid  chapter heading body alt  source
+    #  alt = de-hyphenated compounds; low weight, it is a fallback not a signal
+    "sections": (0.0, 5.0, 8.0, 1.0, 2.0, 0.0),
+}
+
+
+def search(db, table, cols, expr, limit=5):
+    if not expr:
+        return []
+    weights = ", ".join(str(w) for w in WEIGHTS[table])
+    sql = (f"SELECT {', '.join(cols)}, bm25({table}, {weights}) AS score "
+           f"FROM {table} WHERE {table} MATCH ? ORDER BY score LIMIT ?")
+    try:
+        rows = db.execute(sql, (expr, limit)).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [dict(zip(list(cols) + ["score"], r)) for r in rows]
+
+
+# What the user is asking FOR separates the paths far better than how strongly
+# BM25 scored. "how do I record my screen" and "command to update omarchy" both
+# have strong exact hits; only the question's form says one wants an explanation
+# and the other wants a command. Threshold sweeps top out at 13/20 without this.
+ASK_LOOKUP = re.compile(
+    r"\b(keybind\w*|hotkey|shortcut|binding|"
+    r"(what|which)\s+(key|command|binary)|"
+    r"command\s+(to|for|that)|key\s+(to|for)|bound\s+to)\b", re.I)
+
+ASK_PROSE = re.compile(
+    r"\b(how\s+(do|does|can|would|should)|what\s+(does|happens|is)\b|"
+    # "what terminal does this use", "what browser is default" -- a question
+    # about a thing, not a request for a key or a command. Without this the
+    # score comparison sent it down the fast path and answered a question
+    # about terminals with speaker-tuning commands.
+    r"what\s+\w+\s+(does|do|is|are)\b|"
+    r"why|explain|difference\s+between|set\s+up|configure|tell\s+me\s+about)\b", re.I)
+
+
+def classify(query):
+    """Return 'fast', 'prose', or None when the phrasing does not say."""
+    lookup, prose = ASK_LOOKUP.search(query), ASK_PROSE.search(query)
+    if lookup and not prose:
+        return "fast"
+    if prose and not lookup:
+        return "prose"
+    # Both or neither present: let the scores decide.
+    return None
+
+
+def retrieve(db, query, cfg):
+    """Decide the path and gather evidence. Returns a dict describing the
+    decision so the eval harness can check retrieval independently of the LLM."""
+    binds = search(db, "binds", ("keys", "description"), match_expr(query, "binds"))
+    cmds = search(db, "commands", ("route", "summary", "args", "examples"),
+                  match_expr(query, "commands"))
+    # Fetch a wide pool. The re-scoring below can only reorder what was
+    # retrieved, so a tight limit silently defeats it: 06-themes#0 ranked just
+    # outside a limit of 8, so its overview bonus never had anything to apply
+    # to. SQLite makes the wider fetch free.
+    secs = search(db, "sections", ("sid", "chapter", "heading", "body", "source"),
+                  match_expr(query, "sections"), limit=40)
+
+    # The packaged skill docs are written for coding agents, the manual for
+    # people. Both are indexed because the skill docs cover config detail the
+    # manual skips, but when they score close the manual is the better answer
+    # to a "how do I" question, so it wins ties.
+    for s in secs:
+        if not s["source"].startswith("manual/"):
+            s["score"] += SKILL_DOC_PENALTY
+
+    secs.sort(key=lambda s: s["score"])
+    secs = dedupe_by_chapter(secs)[:5]
+
+    best_exact = min([r["score"] for r in binds + cmds], default=0.0)
+    best_sec = min([r["score"] for r in secs], default=0.0)
+
+    intent = classify(query)
+    if intent == "fast":
+        # Honour the ask only if the index actually has something to show.
+        fast = best_exact <= cfg["fast_path_max_score"]
+    elif intent == "prose":
+        fast = False
+    else:
+        fast = (best_exact <= cfg["fast_path_max_score"]
+                and best_exact <= best_sec - cfg["fast_path_margin"])
+
+    return {
+        "query": query, "path": "fast" if fast else "prose", "intent": intent,
+        "binds": binds, "commands": cmds, "sections": secs,
+        "best_exact": best_exact, "best_section": best_sec,
+    }
+
+
+def get_section(db, sid):
+    row = db.execute(
+        "SELECT sid, chapter, heading, body, source FROM sections WHERE sid = ?",
+        (sid,)).fetchone()
+    if not row:
+        return None
+    return dict(zip(("sid", "chapter", "heading", "body", "source"), row))
+
+
+def chapter_sections(db, chapter_id):
+    rows = db.execute(
+        "SELECT sid, chapter, heading, body, source FROM sections "
+        "WHERE sid LIKE ? ORDER BY sid", (f"{chapter_id}#%",)).fetchall()
+    return [dict(zip(("sid", "chapter", "heading", "body", "source"), r)) for r in rows]
+
+
+# --------------------------------------------------------------------------
+# prompt
+# --------------------------------------------------------------------------
+
+def load_toc():
+    """Return (outline_text, {number: sid}).
+
+    Sections are numbered 1..N rather than printed as full ids. Two reasons:
+    repeating "13-toggles-idle-screensaver#4" on every line more than doubled
+    the outline (2,900 tokens vs 1,300), and a small model emitting a single
+    integer is far more reliable than one reconstructing a compound id.
+    """
+    try:
+        with open(TOC, encoding="utf-8") as fh:
+            toc = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return "", {}
+
+    lines, mapping, n = [], {}, 0
+    for ch in toc:
+        secs = ch["sections"]
+        # 47 of 51 chapters' preamble sections are titled "overview", because
+        # the chapter has no "##" headings. Printing the chapter name on one
+        # line and "N overview" on the next leaves the model matching a query
+        # against the word "overview" — it navigated "change the wallpaper" to
+        # a theming section rather than to Backgrounds for exactly this reason.
+        # A single-section chapter therefore becomes one self-describing line.
+        if len(secs) == 1 and secs[0]["title"] == "overview":
+            n += 1
+            mapping[n] = secs[0]["id"]
+            lines.append(f"{n} {ch['chapter']}")
+            continue
+
+        lines.append(f"{ch['chapter']}")
+        for s in secs:
+            n += 1
+            mapping[n] = s["id"]
+            title = ch["chapter"] if s["title"] == "overview" else s["title"]
+            lines.append(f" {n} {title}")
+    return "\n".join(lines), mapping
+
+
+def render_toc():
+    return load_toc()[0]
+
+
+SYSTEM = """You are a local assistant for Omarchy, an Arch Linux distribution \
+running Hyprland. You answer strictly from the Omarchy manual for THIS machine's \
+installed version.
+
+Rules:
+- Answer only from text you are given. Never invent a keybinding, command, or \
+config path.
+- If what you were given does not answer the question, say so plainly.
+- Be brief. Two or three sentences, or a short list. No preamble.
+- Quote keybindings and commands exactly as written in the source.
+
+Manual outline — chapter titles, with their numbered sections beneath:
+{toc}"""
+
+
+def build_system():
+    return SYSTEM.format(toc=render_toc())
+
+
+# --------------------------------------------------------------------------
+# model
+# --------------------------------------------------------------------------
+
+class ServerDown(Exception):
+    pass
+
+
+def chat(cfg, system, user, max_tokens=None, temperature=None):
+    payload = json.dumps({
+        "messages": [{"role": "system", "content": system},
+                     {"role": "user", "content": user}],
+        "temperature": cfg["temperature"] if temperature is None else temperature,
+        "max_tokens": max_tokens or cfg["max_tokens"],
+        "cache_prompt": True,
+        # Qwen3.x reasoning traces would blow the latency budget on every lookup.
+        "chat_template_kwargs": {"enable_thinking": False},
+    }).encode()
+
+    req = urllib.request.Request(
+        f"{cfg['server']}/v1/chat/completions",
+        data=payload, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=cfg["timeout"]) as r:
+            data = json.load(r)
+    except urllib.error.URLError as e:
+        raise ServerDown(str(e)) from e
+    except TimeoutError as e:
+        raise ServerDown(f"timed out after {cfg['timeout']}s") from e
+
+    try:
+        text = data["choices"][0]["message"]["content"].strip()
+    except (KeyError, IndexError) as e:
+        raise ServerDown(f"unexpected response shape: {e}") from e
+    # Strip a stray reasoning block if the template emitted one anyway.
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
+SECTION_RE = re.compile(r"[0-9a-z][0-9a-z-]*#\d+")
+CHAPTER_RE = re.compile(r"\b(\d{2}-[a-z0-9-]+|skill-[a-z0-9-]+)\b")
+
+
+def navigate(db, cfg, system, query, candidates):
+    """PageIndex call 1: model picks a section id from the cached outline.
+
+    BM25's top hits are offered as a hint, but the model may pick anything in
+    the outline -- that is the point of navigation over pure lexical search.
+    """
+    _, numbers = load_toc()
+    by_sid = {sid: n for n, sid in numbers.items()}
+
+    hint = ""
+    if candidates:
+        rows = []
+        for s in candidates[:5]:
+            n = by_sid.get(s["sid"])
+            if n:
+                rows.append(f"  {n} {s['chapter']} - {s['heading']}")
+        if rows:
+            hint = "\n\nLexical search suggests these, but choose freely:\n" + "\n".join(rows)
+
+    user = (f"QUESTION: {query}{hint}\n\n"
+            "Reply with ONE section number from the outline and nothing else.")
+    # Navigation is a lookup, not a creative act: greedy decoding only. The
+    # token budget is generous enough that a model which emits a reasoning
+    # block anyway still gets to the number (see prose_smoke in bench.sh).
+    raw = chat(cfg, system, user, max_tokens=64, temperature=0.0)
+
+    # Preferred form: a bare section number.
+    m = re.search(r"\b(\d{1,4})\b", raw)
+    if m:
+        sec = get_section(db, numbers.get(int(m.group(1)), ""))
+        if sec:
+            return sec, raw
+
+    # Older prompts asked for a full section id; still accept one.
+    m = SECTION_RE.search(raw)
+    if m:
+        sec = get_section(db, m.group(0))
+        if sec:
+            return sec, raw
+    # Model named a chapter rather than a section; take that chapter's best
+    # section according to BM25, or its first.
+    m = CHAPTER_RE.search(raw)
+    if m:
+        secs = chapter_sections(db, m.group(1))
+        if secs:
+            ranked = [s for s in candidates if s["sid"].startswith(m.group(1) + "#")]
+            return (ranked[0] if ranked else secs[0]), raw
+    return None, raw
+
+
+# --------------------------------------------------------------------------
+# rendering
+# --------------------------------------------------------------------------
+
+def wrap(text, width=76, indent=""):
+    out = []
+    for para in text.split("\n"):
+        if not para.strip():
+            out.append("")
+            continue
+        out.extend(textwrap.wrap(para, width=width, initial_indent=indent,
+                                 subsequent_indent=indent) or [""])
+    return "\n".join(out)
+
+
+def render_fast(res, cfg):
+    """Show the best binds and the best commands, judged against their own
+    table's top score. A shared cutoff hid the keybinding whenever a command
+    happened to score higher -- but "the key AND the command that does the same
+    thing" is exactly the useful answer."""
+    lines = []
+
+    strong = [b for b in res["binds"]
+              if b["score"] <= cfg["fast_path_max_score"]]
+    if strong:
+        best = strong[0]["score"]
+        for b in strong[:3]:
+            if b["score"] > best + 1.5:
+                break
+            lines.append(f"  {c(b['keys'], '1;36'):<40} {b['description']}")
+
+    strong = [cm for cm in res["commands"]
+              if cm["score"] <= cfg["fast_path_max_score"]]
+    if strong:
+        if lines:
+            lines.append("")
+        best = strong[0]["score"]
+        for cm in strong[:3]:
+            if cm["score"] > best + 1.5:
+                break
+            route = f"{cm['route']} {cm['args']}".strip()
+            lines.append(f"  {c(route, '1;32')}")
+            if cm["summary"]:
+                lines.append(f"      {cm['summary']}")
+    return "\n".join(lines)
+
+
+def render_sources(items):
+    return c("  " + "  ".join(items), "2")
+
+
+# --------------------------------------------------------------------------
+# answering
+# --------------------------------------------------------------------------
+
+def answer(db, cfg, query, system, verbose=False):
+    t0 = time.time()
+    res = retrieve(db, query, cfg)
+
+    if res["path"] == "fast":
+        body = render_fast(res, cfg)
+        if body:
+            print()
+            print(body)
+            print()
+            print(render_sources([f"{time.time() - t0:.2f}s", "index (no model)"]))
+            return res
+
+    # Prose path.
+    try:
+        sec, raw = navigate(db, cfg, system, query, res["sections"])
+    except ServerDown as e:
+        print()
+        print(c("  llama-server is not reachable.", "1;33"))
+        print(f"  {e}")
+        if res["sections"]:
+            s = res["sections"][0]
+            print()
+            print(c(f"  Closest manual section ({s['source']} - {s['heading']}):", "2"))
+            print()
+            print(wrap(s["body"][:1200], indent="  "))
+        print()
+        return res
+
+    if sec is None:
+        sec = res["sections"][0] if res["sections"] else None
+    if sec is None:
+        print(f"\n  Nothing in the manual matched {query!r}.\n")
+        return res
+
+    res["chosen_section"] = sec["sid"]
+    body = sec["body"][:cfg["max_inject_chars"]]
+    user = (f"QUESTION: {query}\n\n"
+            f"MANUAL SECTION {sec['sid']} ({sec['chapter']} - {sec['heading']}):\n"
+            f"{body}\n\n"
+            "Answer the question using only this section. If it does not "
+            "contain the answer, say so.")
+    try:
+        reply = chat(cfg, system, user)
+    except ServerDown as e:
+        print(f"\n  {c('llama-server went away:', '1;33')} {e}\n")
+        return res
+
+    print()
+    print(wrap(reply, indent="  "))
+    print()
+    print(render_sources([f"{time.time() - t0:.2f}s", sec["source"],
+                          f"§{sec['heading']}"]))
+    if verbose:
+        print(c(f"  [nav -> {sec['sid']}; injected {len(body)} chars]", "2"))
+    return res
+
+
+# --------------------------------------------------------------------------
+# entry
+# --------------------------------------------------------------------------
+
+def repl(db, cfg, system):
+    print(c("  Omarchy local agent", "1") + c("   (ctrl-d to exit)", "2"))
+    meta = dict(db.execute("SELECT key, value FROM meta").fetchall())
+    print(c(f"  manual {meta.get('manual_ref', '?')} | "
+            f"{meta.get('n_binds', '?')} binds | "
+            f"{meta.get('n_commands', '?')} commands", "2"))
+    while True:
+        try:
+            q = input(c("\n> ", "1;36")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not q:
+            continue
+        if q in ("exit", "quit"):
+            return
+        try:
+            answer(db, cfg, q, system)
+        except KeyboardInterrupt:
+            print(c("\n  interrupted", "2"))
+
+
+APP_ID = "omarchy-local-agent"
+
+# Each terminal spells "set the window app-id" differently, and the app-id is
+# what the Hyprland float rule matches on.
+TERMINAL_APP_ID_FLAG = {
+    "foot": "--app-id={}",
+    "alacritty": "--class={}",
+    "kitty": "--class={}",
+    "ghostty": "--class={}",
+}
+
+
+def popup():
+    """Relaunch ourselves in a floating terminal window."""
+    import shutil
+    import subprocess
+
+    # Respect the user's configured Omarchy terminal where we know how to pass
+    # an app-id to it; otherwise take whatever is installed.
+    preferred = os.environ.get("TERMINAL", "")
+    order = [preferred] if preferred in TERMINAL_APP_ID_FLAG else []
+    order += ["ghostty", "alacritty", "kitty", "foot"]
+
+    for term in order:
+        path = shutil.which(term)
+        if not path:
+            continue
+        cmd = [path, TERMINAL_APP_ID_FLAG[term].format(APP_ID),
+               "-e", os.path.abspath(__file__), "--repl"]
+        try:
+            subprocess.Popen(cmd, start_new_session=True)
+            return 0
+        except OSError as e:
+            print(f"could not launch {term}: {e}", file=sys.stderr)
+    print("no supported terminal found", file=sys.stderr)
+    return 1
+
+
+# How far below the best hit a live-search result may score and still be shown.
+LIVE_MARGIN = 2.0
+
+
+def near_best(rows, margin=LIVE_MARGIN):
+    """Keep rows scoring within `margin` of the best one."""
+    if not rows:
+        return rows
+    best = rows[0]["score"]
+    return [r for r in rows if r["score"] <= best + margin]
+
+
+def search_daemon():
+    """One query per line on stdin, one JSON result per line on stdout.
+
+    The GUI searches on every keystroke. Spawning this script per keystroke
+    costs ~100ms, nearly all of it interpreter and import startup, which reads
+    as lag while typing. Holding the process open makes each query ~1ms.
+    """
+    cfg = load_config()
+    db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    for line in sys.stdin:
+        query = line.strip()
+        if not query:
+            continue
+        try:
+            # Live search differs from answering in two ways: prefix-match the
+            # word being typed, and show whatever matched rather than applying
+            # the answer-mode score cutoff. The user is browsing a list and
+            # picking, so an imperfect match is still useful; silence is not.
+            binds = search(db, "binds", ("keys", "description"),
+                           match_expr(query, "binds", prefix=True))
+            cmds = search(db, "commands", ("route", "summary", "args", "examples"),
+                          match_expr(query, "commands", prefix=True))
+            secs = search(db, "sections",
+                          ("sid", "chapter", "heading", "body", "source"),
+                          match_expr(query, "sections", prefix=True), limit=40)
+            for s in secs:
+                if not s["source"].startswith("manual/"):
+                    s["score"] += SKILL_DOC_PENALTY
+            secs.sort(key=lambda s: s["score"])
+            secs = dedupe_by_chapter(secs)[:5]
+
+            # Show only what is competitive with the best hit in each table.
+            # A fixed cutoff is wrong here (scores scale with query length), but
+            # a trailing tail of weak matches is exactly what makes a live list
+            # feel noisy rather than helpful.
+            binds = near_best(binds)
+            cmds = near_best(cmds)
+
+            out = {
+                "query": query,
+                "binds": [{"keys": b["keys"], "description": b["description"]}
+                          for b in binds[:5]],
+                "commands": [{"route": c["route"], "args": c["args"],
+                              "summary": c["summary"]} for c in cmds[:5]],
+                "sections": [{"sid": s["sid"], "chapter": s["chapter"],
+                              "heading": s["heading"], "source": s["source"]}
+                             for s in secs],
+            }
+        except Exception as e:  # one bad query must never kill the daemon
+            out = {"query": query, "error": str(e),
+                   "binds": [], "commands": [], "sections": []}
+        sys.stdout.write(json.dumps(out) + "\n")
+        sys.stdout.flush()
+
+
+def explain_section(sid, query):
+    """Answer using one specific manual section — the GUI already knows which
+    section the user highlighted, so navigation (model call 1) is skipped
+    entirely. Prints plain text on stdout."""
+    cfg = load_config()
+    db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    sec = get_section(db, sid)
+    if sec is None:
+        print(f"No such section: {sid}")
+        return 1
+    body = sec["body"][:cfg["max_inject_chars"]]
+    user = (f"QUESTION: {query}\n\n"
+            f"MANUAL SECTION {sec['sid']} ({sec['chapter']} - {sec['heading']}):\n"
+            f"{body}\n\n"
+            "Answer the question using only this section. If it does not "
+            "contain the answer, say so.")
+    try:
+        print(chat(cfg, build_system(), user))
+    except ServerDown as e:
+        print(f"The local model is not running.\n\n{e}\n\n"
+              f"Start it with:  systemctl --user start omarchy-local-agent\n\n"
+              f"From the manual ({sec['source']} - {sec['heading']}):\n\n"
+              f"{sec['body'][:1500]}")
+        return 1
+    return 0
+
+
+def main():
+    p = argparse.ArgumentParser(description="Local offline Omarchy assistant")
+    p.add_argument("query", nargs="*", help="question to answer")
+    p.add_argument("--repl", action="store_true", help="interactive session")
+    p.add_argument("--search-daemon", action="store_true",
+                   help="read queries on stdin, emit JSON results per line")
+    p.add_argument("--explain-section", metavar="SID",
+                   help="answer using this section id (skips model navigation)")
+    p.add_argument("--popup", action="store_true",
+                   help="open the REPL in a floating terminal window")
+    p.add_argument("--retrieve-only", action="store_true",
+                   help="print the retrieval decision without running the model")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("-v", "--verbose", action="store_true")
+    args = p.parse_args()
+
+    if args.popup:
+        sys.exit(popup())
+
+    if not os.path.exists(DB):
+        sys.exit("No index. Run: omarchy-local-agent-index")
+
+    if args.search_daemon:
+        search_daemon()
+        return
+
+    if args.explain_section:
+        sys.exit(explain_section(args.explain_section, " ".join(args.query)))
+
+    cfg = load_config()
+    db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+
+    if args.repl or not args.query:
+        system = build_system()
+        repl(db, cfg, system)
+        return
+
+    query = " ".join(args.query)
+
+    if args.retrieve_only or args.json:
+        res = retrieve(db, query, cfg)
+        out = {
+            "query": query, "path": res["path"],
+            "best_exact": res["best_exact"], "best_section": res["best_section"],
+            "binds": [{"keys": b["keys"], "description": b["description"],
+                       "score": b["score"]} for b in res["binds"][:3]],
+            "commands": [{"route": cm["route"], "summary": cm["summary"],
+                          "score": cm["score"]} for cm in res["commands"][:3]],
+            "sections": [{"sid": s["sid"], "heading": s["heading"],
+                          "source": s["source"], "score": s["score"]}
+                         for s in res["sections"][:3]],
+        }
+        print(json.dumps(out, indent=2))
+        return
+
+    answer(db, cfg, query, build_system(), verbose=args.verbose)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)
