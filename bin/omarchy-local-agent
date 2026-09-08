@@ -990,7 +990,7 @@ REFUSE = [
      "recursive rm is never run from the help panel"),
     (r"-exec(dir)?\s+(/[\w/]*/)?(rm|shred|dd|mkfs|chmod|chown)(\s|$)",
      "find -exec with a destructive command is never run from the help panel"),
-    (r"\|\s*xargs\b[^;&|]*?(^|\s)(/[\w/]*/)?(rm|shred|chmod|chown|dd|mkfs)(\s|$)",
+    (r"(^|[\s;&|(`$])xargs\b[^;&|]*?(^|\s)(/[\w/]*/)?(rm|shred|chmod|chown|dd|mkfs)(\s|$)",
      "xargs into a destructive command is never run from the help panel"),
     (r"(?i)(^|[\s;&|(`$/])(sudo\s+)?(sh|bash|zsh|fish|dash|ksh|python3?|perl|ruby|node)\s+(-[A-Za-z]*[ce]|--command|--eval)(\s|$)",
      "handing a step to an interpreter is never done from the help panel"),
@@ -1173,15 +1173,18 @@ def command_policy(cmd, db=None):
     c = " ".join(cmd.strip().split())
     if not c:
         return {"verdict": "refuse", "reason": "empty command"}
-    # Match on a copy with backslashes and single-word quoting undone:
-    # 'rm' -rf, "rm" -rf and \rm -rf are the same command to the shell.
-    # Longer quoted strings stay quoted so a commit message that mentions
-    # rm -rf is not mistaken for the command.
-    bare = re.sub(r"(['\"])([\w./-]+)\1", r"\2", c.replace("\\", ""))
+    # Matchers run on a normalised copy: backslashes removed, single-word
+    # quoting undone ('rm', "rm", \rm are rm to the shell), and any longer
+    # quoted string replaced by a placeholder so prose inside quotes (a commit
+    # message that mentions rm -rf) is opaque. Interpreter payloads need no
+    # inspection: sh -c / python -c are refused whatever they carry.
+    bare = c.replace("\\", "")
+    bare = re.sub(r"(['\"])([\w./~-]+)\1", r"\2", bare)
+    bare = re.sub(r"'[^']*'|\"[^\"]*\"", "QUOTED", bare)
     for pat, why in REFUSE:
-        if re.search(pat, c) or re.search(pat, bare):
+        if re.search(pat, bare):
             return {"verdict": "refuse", "reason": why}
-    why = recursive_perm_target(c) or recursive_perm_target(bare)
+    why = recursive_perm_target(bare)
     if why:
         return {"verdict": "refuse", "reason": why}
     if "<" in c:
