@@ -994,6 +994,8 @@ REFUSE = [
      "xargs into a destructive command is never run from the help panel"),
     (r"(?i)(^|[\s;&|(`$/])(sudo\s+)?(sh|bash|zsh|fish|dash|ksh|python3?|perl|ruby|node)\s+(-[A-Za-z]*[ce]|--command|--eval)(\s|$)",
      "handing a step to an interpreter is never done from the help panel"),
+    (r"(^|[\s;&|(`$/])(sudo\s+)?(eval|watch|exec)(\s|$)",
+     "eval, watch and exec are never run from the help panel"),
     (r"(^|[\s;&|(`$])dd(\s|$)", "dd is never run from the help panel"),
     (r"(^|[\s;&|(`$])mkfs(\.|\s|$)", "mkfs is never run from the help panel"),
     (r"(^|[\s;&|(`$])(reboot|shutdown|poweroff|halt)(\s|$)", "power commands are never run from the help panel"),
