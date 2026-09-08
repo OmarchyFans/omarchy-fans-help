@@ -1173,9 +1173,11 @@ def command_policy(cmd, db=None):
     c = " ".join(cmd.strip().split())
     if not c:
         return {"verdict": "refuse", "reason": "empty command"}
-    # Match on a copy with quotes and backslashes removed: 'rm' -rf, "rm" -rf
-    # and \rm -rf are the same command to the shell.
-    bare = re.sub(r"[\\'\"]", "", c)
+    # Match on a copy with backslashes and single-word quoting undone:
+    # 'rm' -rf, "rm" -rf and \rm -rf are the same command to the shell.
+    # Longer quoted strings stay quoted so a commit message that mentions
+    # rm -rf is not mistaken for the command.
+    bare = re.sub(r"(['\"])([\w./-]+)\1", r"\2", c.replace("\\", ""))
     for pat, why in REFUSE:
         if re.search(pat, c) or re.search(pat, bare):
             return {"verdict": "refuse", "reason": why}
