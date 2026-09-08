@@ -1,23 +1,22 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
-import Quickshell.Wayland
 import qs.Commons
 import qs.Ui
 
 // Offline help for Omarchy: live search over this machine's keybindings, the
-// omarchy CLI, and the manual pinned to the installed version.
+// omarchy CLI, and the manual pinned to the installed version, plus a chat
+// with the local model about what to do.
 //
-// Two speeds, deliberately:
-//   typing  -> `omarchy-local-agent --search-daemon`, a process held open for
-//              the life of the panel. Each keystroke is a line in, a line of
-//              JSON out, ~1ms. Spawning the CLI per keystroke costs ~100ms of
-//              interpreter startup, which reads as lag.
-//   Enter   -> the local LLM explains one manual section. Seconds, so it gets
-//              its own view with a visible "thinking" state.
+// The window is a normal toplevel (FloatingWindow), not an overlay: it stays
+// on the workspace while a command runs in a terminal or the manual opens
+// next to it. Host contract (kind "panel", keepLoaded): the shell injects
+// `shell` and `manifest`, calls open()/close(), reads `opened`; we call
+// shell.hide(id) when the user closes the window.
 //
-// Styling borrows the [menu] surface tokens, so any theme that styles the
-// Omarchy menu styles this too.
+// Two helper processes, both held open while the window is visible:
+//   --search-daemon  one query line in, one JSON line out, ~1ms a keystroke
+//   --chat-daemon    one JSON request in, streamed JSON deltas out
 Item {
   id: root
 
@@ -25,83 +24,94 @@ Item {
   property var manifest: null
   readonly property string pluginId: "io.github.modpunk.omarchy-help"
   readonly property string agent: Quickshell.env("HOME") + "/.local/bin/omarchy-local-agent"
+  readonly property bool opened: window.visible
+  property bool closingFromHost: false
 
-  property bool opened: false
+  property string mode: "search"        // "search" | "chat"
   property string filterText: ""
   property int selectedIndex: 0
+  property string notice: ""
+  property string selectedKind: ""      // kind of the selected row, for the footer hint
+  onSelectedIndexChanged: syncSelected()
+  function syncSelected() { var r = selectableAt(selectedIndex); selectedKind = r ? r.kind : "" }
 
-  // answer view
-  property bool answering: false
-  property string answerTitle: ""
-  property string answerText: ""
-  property bool answerBusy: false
+  // chat state
+  property string chatSid: ""           // manual section pinned for this conversation
+  property string chatHeading: ""
+  property string chatSource: ""
+  property bool chatBusy: false
+  property bool chatSlow: false
+  property int requestId: 0
+  property int streamIndex: -1
 
   property color background: Color.menu.background
   property color foreground: Color.menu.text
   property color border: Color.menu.border
-  property var borderSpec: Border.surfaceSpec("menu", "border", border, Math.max(1, Style.space(2)))
-  property color scrim: Color.menu.scrim
   property color selectedBackground: Color.menu.selectedBackground
   property color selectedText: Color.menu.selectedText
-  readonly property int cornerRadius: Style.cornerRadius
+  property color accent: Color.accent
+  readonly property color dim: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.55)
+  readonly property color faint: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.06)
   property string fontFamily: Style.font.menuFamily
   property int contentMargin: Style.spacing.panelPadding
-  property int headerHeight: Math.max(Style.space(34), Style.font.title + Style.spacing.controlPaddingY * 2)
   property int contentSpacing: Style.spacing.md
-  property int cardWidth: Math.min(Style.space(680), panel.width - Style.gapsOut * 2)
-  property int cardHeight: Math.min(Style.space(520), panel.height - Style.gapsOut * 2)
+  readonly property int inputLine: Math.round(Style.font.heading * 1.45)
+  readonly property int footerHeight: Math.max(Style.space(18), Style.font.caption + Style.space(6))
 
   // ---- lifecycle ----------------------------------------------------------
 
   function open(payloadJson) {
-    root.opened = true
-    root.clearAnswer()
-    root.setFilter("")
-    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    closingFromHost = false
+    if (results.count === 0) rebuildEmpty()
+    window.visible = true
+    focusTimer.restart()
   }
-
-  function close() { root.opened = false }
-
-  function dismiss() {
-    root.opened = false
-    if (root.shell && typeof root.shell.hide === "function") root.shell.hide(root.pluginId)
+  function close() { closingFromHost = true; window.visible = false; closingFromHost = false }
+  function requestClose() {
+    if (shell && typeof shell.hide === "function") shell.hide(pluginId)
+    else window.visible = false
   }
+  function toggle() { if (window.visible) requestClose(); else open("{}") }
+  function focusInput() { Qt.callLater(function() { input.forceActiveFocus() }) }
 
-  function toggle() {
-    if (root.opened) root.dismiss(); else root.open("{}")
+  // Esc walks back: chat -> search, query -> empty, empty -> close.
+  function back() {
+    if (mode === "chat") { leaveChat(); return }
+    if (input.text !== "") { input.text = ""; return }
+    requestClose()
   }
 
   // ---- search -------------------------------------------------------------
 
-  function setFilter(text) {
-    root.filterText = text
-    root.selectedIndex = 0
-    if (!text) { results.clear(); rebuildEmpty(); return }
-    if (searchProc.running) searchProc.write(text + "\n")
+  function onInputChanged(text) {
+    if (mode !== "search") return
+    var q = text.replace(/\s+/g, " ").trim()
+    filterText = q
+    selectedIndex = 0
+    if (!q) { rebuildEmpty(); return }
+    if (searchProc.running) searchProc.write(q + "\n")
   }
 
-  // With no query there is nothing to rank, so show a few things worth knowing
-  // rather than an empty box that gives no hint about what this searches.
   function rebuildEmpty() {
     results.clear()
     results.append({ kind: "hint", primary: "Type to search keybindings, commands and the manual",
                      secondary: "", sid: "" })
     results.append({ kind: "hint", primary: "Examples:  nightlight  ·  screenshot  ·  how do I change my theme",
                      secondary: "", sid: "" })
+    results.append({ kind: "hint", primary: "Enter runs a command, explains a section, or starts a chat.  Shift+Enter adds a line.",
+                     secondary: "", sid: "" })
+    syncSelected()
   }
 
   function applyResults(payload) {
     var data
     try { data = JSON.parse(payload) } catch (e) { return }
-    if (!data || data.query !== root.filterText) return   // a later keystroke won
+    if (!data || data.query !== filterText) return   // a later keystroke won
 
     results.clear()
-
-    // Always offer the free-form question first: it is what someone typing a
-    // sentence rather than a word actually wants.
-    if (root.filterText.length > 2)
-      results.append({ kind: "ask", primary: "Ask the manual: " + root.filterText,
-                       secondary: "the local model answers from the manual", sid: "" })
+    if (filterText.length > 2)
+      results.append({ kind: "ask", primary: "Chat with the local agent: " + filterText,
+                       secondary: "answers from the manual, then keeps the conversation going", sid: "" })
 
     var i
     for (i = 0; i < (data.binds || []).length; i++)
@@ -112,19 +122,16 @@ Item {
                        primary: (data.commands[i].route + " " + (data.commands[i].args || "")).trim(),
                        secondary: data.commands[i].summary || "", sid: "" })
     for (i = 0; i < (data.sections || []).length; i++) {
-      // A chapter with no sub-headings has heading == chapter; printing both
-      // just renders the same words twice.
       var head = data.sections[i].heading
       var chap = data.sections[i].chapter
       results.append({ kind: "section", primary: head,
                        secondary: (chap === head ? "" : chap),
                        sid: data.sections[i].sid })
     }
-
     if (results.count === 0)
-      results.append({ kind: "hint", primary: "Nothing matched “" + root.filterText + "”",
-                       secondary: "", sid: "" })
-    root.selectedIndex = 0
+      results.append({ kind: "hint", primary: "Nothing matched “" + filterText + "”", secondary: "", sid: "" })
+    selectedIndex = 0
+    syncSelected()
   }
 
   function selectableAt(i) {
@@ -132,240 +139,361 @@ Item {
     var r = results.get(i)
     return r.kind === "hint" ? null : r
   }
+  function selected() { return selectableAt(selectedIndex) }
 
   function move(delta) {
     if (results.count === 0) return
-    var i = root.selectedIndex
+    var i = selectedIndex
     for (var n = 0; n < results.count; n++) {
       i = (i + delta + results.count) % results.count
-      if (selectableAt(i)) { root.selectedIndex = i; resultList.positionViewAtIndex(i, ListView.Contain); return }
+      if (selectableAt(i)) { selectedIndex = i; resultList.positionViewAtIndex(i, ListView.Contain); return }
     }
   }
 
-  // ---- activation ---------------------------------------------------------
+  // ---- actions ------------------------------------------------------------
+
+  function primaryLabel(kind) {
+    return kind === "command" ? "Run" : kind === "section" ? "Explain" : kind === "ask" ? "Chat" : kind === "bind" ? "Copy" : ""
+  }
+  function secondaryLabel(kind) {
+    return kind === "command" ? "Copy" : kind === "section" ? "Open manual" : ""
+  }
+
+  function primary(r) {
+    if (!r) return
+    if (r.kind === "command") runCommand(r.primary)
+    else if (r.kind === "section") startChat(filterText || ("Explain " + r.primary), r.sid, r.primary)
+    else if (r.kind === "ask") startChat(filterText, "", "")
+    else if (r.kind === "bind") copy(r.primary)
+  }
+  function secondary(r) {
+    if (!r) return
+    if (r.kind === "command") copy(r.primary)
+    else if (r.kind === "section") openSection(r.sid)
+    else if (r.kind === "bind") copy(r.primary)
+  }
 
   function activate() {
-    var r = selectableAt(root.selectedIndex)
-    if (!r) return
-    if (r.kind === "section") { askSection(r.sid, r.primary) }
-    else if (r.kind === "ask") { askSection("", root.filterText) }
-    else { copy(r.primary) }
+    if (mode === "chat") { var q = input.text.trim(); if (q) { input.text = ""; send(q) }; return }
+    primary(selected())
   }
 
   function copy(text) {
     Quickshell.execDetached(["wl-copy", "--", text])
-    root.answerTitle = "Copied"
-    root.answerText = text
-    root.answerBusy = false
-    root.answering = true
-    copyTimer.restart()
+    flash("Copied  " + text)
   }
-
-  function askSection(sid, title) {
-    root.answering = true
-    root.answerBusy = true
-    root.answerTitle = title
-    root.answerText = ""
-    explainProc.sid = sid
-    explainProc.query = root.filterText
-    explainProc.running = false
-    explainProc.running = true
+  // The command opens on an editable prompt in a floating terminal: Enter
+  // runs it, placeholders can be fixed first. The CLI builds the argv.
+  function runCommand(cmd) {
+    Quickshell.execDetached([agent, "--run", cmd])
+    flash("Opened a terminal with  " + cmd)
   }
+  function openSection(sid) {
+    if (!sid) return
+    Quickshell.execDetached([agent, "--open-section", sid])
+    flash("Opening the manual at that section")
+  }
+  function flash(text) { notice = text; noticeTimer.restart() }
 
-  function clearAnswer() {
-    root.answering = false
-    root.answerBusy = false
-    root.answerTitle = ""
-    root.answerText = ""
+  // ---- chat ---------------------------------------------------------------
+
+  function startChat(query, sid, heading) {
+    if (!query) return
+    messages.clear()
+    chatSid = sid || ""
+    chatHeading = heading || ""
+    chatSource = ""
+    mode = "chat"
+    input.text = ""
+    send(query)
+    focusInput()
+  }
+  function newChat() {
+    messages.clear()
+    chatSid = ""; chatHeading = ""; chatSource = ""
+    chatBusy = false; chatSlow = false; streamIndex = -1
+    requestId++            // orphan any reply still streaming
+    input.text = ""
+    focusInput()
+  }
+  function leaveChat() {
+    mode = "search"
+    input.text = filterText
+    focusInput()
+  }
+  function send(query) {
+    if (!query) return
+    if (chatBusy) { flash("Wait for the current answer first"); return }
+    var history = []
+    for (var i = 0; i < messages.count; i++) {
+      var m = messages.get(i)
+      if (m.text) history.push({ role: m.role, content: m.text })
+    }
+    messages.append({ role: "user", text: query, sid: "", heading: "", source: "" })
+    messages.append({ role: "assistant", text: "", sid: "", heading: "", source: "" })
+    streamIndex = messages.count - 1
+    chatBusy = true; chatSlow = false; slowTimer.restart()
+    requestId++
+    var req = { id: requestId, query: query, history: history, sid: chatSid }
+    if (chatProc.running) chatProc.write(JSON.stringify(req) + "\n")
+    else finishWith("The helper is not running.")
+    transcript.positionViewAtEnd()
+  }
+  function onChatLine(line) {
+    var d
+    try { d = JSON.parse(line) } catch (e) { return }
+    if (!d || d.id !== requestId) return
+    if (streamIndex < 0 || streamIndex >= messages.count) return
+    if (d.status) {
+      if (d.sid) { chatSid = d.sid; chatHeading = d.heading || ""; chatSource = d.source || "" }
+      return
+    }
+    if (d.delta !== undefined) {
+      slowTimer.stop(); chatSlow = false
+      messages.setProperty(streamIndex, "text", messages.get(streamIndex).text + d.delta)
+      transcript.positionViewAtEnd()
+      return
+    }
+    if (d.done) { stamp(d); finishWith(""); return }
+    if (d.error) {
+      var t = d.error
+      if (d.fallback) t += "\n\nFrom the manual (" + (d.heading || "") + "):\n\n" + d.fallback
+      stamp(d)
+      finishWith(t)
+    }
+  }
+  function stamp(d) {
+    if (d.sid) { chatSid = d.sid; chatHeading = d.heading || ""; chatSource = d.source || "" }
+    messages.setProperty(streamIndex, "sid", d.sid || "")
+    messages.setProperty(streamIndex, "heading", d.heading || "")
+    messages.setProperty(streamIndex, "source", d.source || "")
+  }
+  function finishWith(text) {
+    slowTimer.stop(); chatSlow = false; chatBusy = false
+    if (streamIndex >= 0 && streamIndex < messages.count) {
+      var cur = messages.get(streamIndex).text
+      if (text) messages.setProperty(streamIndex, "text", cur ? cur + "\n\n" + text : text)
+      else if (!cur) messages.setProperty(streamIndex, "text", "No answer came back.")
+    }
+    streamIndex = -1
+    transcript.positionViewAtEnd()
   }
 
   ListModel { id: results }
+  ListModel { id: messages }
 
-  Timer { id: copyTimer; interval: 900; onTriggered: root.clearAnswer() }
+  Timer { id: noticeTimer; interval: 2200; onTriggered: root.notice = "" }
+  Timer { id: slowTimer; interval: 6000; onTriggered: root.chatSlow = true }
+  Timer {
+    id: focusTimer; interval: 150
+    onTriggered: { Quickshell.execDetached(["hyprctl", "dispatch", "focuswindow", "title:^Omarchy Help$"]); root.focusInput() }
+  }
 
-  // Held open for the life of the panel: one line in, one JSON line out.
   Process {
     id: searchProc
     command: [root.agent, "--search-daemon"]
-    running: root.opened
+    running: window.visible
     stdinEnabled: true
-    stdout: SplitParser {
-      splitMarker: "\n"
-      onRead: function(line) { if (line) root.applyResults(line) }
-    }
+    stdout: SplitParser { splitMarker: "\n"; onRead: function(line) { if (line) root.applyResults(line) } }
   }
-
   Process {
-    id: explainProc
-    property string sid: ""
-    property string query: ""
-    command: sid
-      ? [root.agent, "--explain-section", sid, query]
-      : [root.agent, query]
-    stdout: StdioCollector {
-      onStreamFinished: {
-        root.answerBusy = false
-        root.answerText = text && text.trim() ? text.trim() : "No answer came back."
-      }
-    }
-    onExited: function(code) {
-      root.answerBusy = false
-      if (!root.answerText) root.answerText = "The helper exited with code " + code + "."
-    }
+    id: chatProc
+    command: [root.agent, "--chat-daemon"]
+    running: window.visible
+    stdinEnabled: true
+    stdout: SplitParser { splitMarker: "\n"; onRead: function(line) { if (line) root.onChatLine(line) } }
+    onExited: function(code) { if (root.chatBusy) root.finishWith("The helper exited with code " + code + ".") }
   }
 
-  PanelWindow {
-    id: panel
-    visible: root.opened
-    anchors { top: true; bottom: true; left: true; right: true }
-    color: "transparent"
-    WlrLayershell.namespace: "omarchy-help"
-    WlrLayershell.layer: WlrLayer.Overlay
-    WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
-    exclusionMode: ExclusionMode.Ignore
+  // ---- window -------------------------------------------------------------
 
-    Rectangle { anchors.fill: parent; color: root.scrim }
-    MouseArea { anchors.fill: parent; onClicked: root.dismiss() }
+  FloatingWindow {
+    id: window
+    visible: false                       // keepLoaded mounts us at shell start
+    title: "Omarchy Help"
+    color: root.background
+    implicitWidth: 760
+    implicitHeight: 580
+    minimumSize: Qt.size(480, 320)
 
-    BorderSurface {
-      id: card
-      width: root.cardWidth
-      height: root.cardHeight
-      radius: root.cornerRadius
-      anchors.centerIn: parent
-      color: root.background
-      borderSpec: root.borderSpec
-      padding: root.contentMargin
+    onVisibleChanged: {
+      if (!visible && !root.closingFromHost && root.shell && typeof root.shell.hide === "function") root.shell.hide(root.pluginId)
+    }
 
-      MouseArea { anchors.fill: parent; onClicked: {} }
-
-      Item {
-        id: keyCatcher
-        anchors.fill: parent
-        focus: true
-        Keys.priority: Keys.BeforeItem
-        Keys.onPressed: function(event) {
-          if (event.key === Qt.Key_Escape) {
-            if (root.answering) root.clearAnswer()
-            else if (root.filterText) root.setFilter("")
-            else root.dismiss()
-            event.accepted = true
-          } else if (root.answering) {
-            // Any key returns to the list; the answer view is read-only.
-            if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-              root.clearAnswer(); event.accepted = true
-            }
-          } else if (event.key === Qt.Key_Backspace) {
-            root.setFilter(root.filterText.slice(0, -1))
-            event.accepted = true
-          } else if (event.key === Qt.Key_Up) {
-            root.move(-1); event.accepted = true
-          } else if (event.key === Qt.Key_Down) {
-            root.move(1); event.accepted = true
-          } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-            root.activate(); event.accepted = true
-          } else if (event.text && event.text.length === 1
-                     && event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127) {
-            root.setFilter(root.filterText + event.text)
-            event.accepted = true
-          }
-        }
-      }
+    FocusScope {
+      anchors.fill: parent
+      focus: true
 
       Column {
         anchors.fill: parent
-        anchors.topMargin: card.contentTopInset
-        anchors.rightMargin: card.contentRightInset
-        anchors.bottomMargin: card.contentBottomInset
-        anchors.leftMargin: card.contentLeftInset
+        anchors.margins: root.contentMargin
         spacing: root.contentSpacing
 
-        // ---- search line ----
-        Item {
+        // ---- input: wraps to the window width, grows to six lines ----
+        Rectangle {
+          id: inputBox
           width: parent.width
-          height: root.headerHeight
-          Text {
-            anchors.left: parent.left; anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            textFormat: Text.PlainText
-            text: root.filterText || "Search Omarchy help…"
-            color: root.foreground
-            opacity: root.filterText ? 1 : 0.58
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.heading
-            elide: Text.ElideRight
+          height: inputFlick.height + Style.spacing.inputPaddingY * 2
+          radius: Style.cornerRadius
+          color: root.faint
+          border.width: 1
+          border.color: input.activeFocus ? root.accent : root.border
+
+          Flickable {
+            id: inputFlick
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.leftMargin: Style.spacing.controlPaddingX
+            anchors.rightMargin: Style.spacing.controlPaddingX
+            anchors.topMargin: Style.spacing.inputPaddingY
+            height: Math.max(root.inputLine, Math.min(input.contentHeight, root.inputLine * 6))
+            contentWidth: width
+            contentHeight: input.contentHeight
+            clip: true
+            boundsBehavior: Flickable.StopAtBounds
+            function ensureVisible(r) {
+              if (contentY >= r.y) contentY = r.y
+              else if (contentY + height <= r.y + r.height) contentY = r.y + r.height - height
+            }
+
+            TextEdit {
+              id: input
+              width: inputFlick.width
+              wrapMode: TextEdit.Wrap
+              color: root.foreground
+              selectionColor: root.accent
+              selectedTextColor: root.background
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.heading
+              selectByMouse: true
+              focus: true
+              onCursorRectangleChanged: inputFlick.ensureVisible(cursorRectangle)
+              onTextChanged: root.onInputChanged(text)
+
+              Keys.priority: Keys.BeforeItem
+              Keys.onPressed: function(event) {
+                var enter = event.key === Qt.Key_Return || event.key === Qt.Key_Enter
+                if (event.key === Qt.Key_Escape) { root.back(); event.accepted = true }
+                else if (enter && (event.modifiers & Qt.ShiftModifier)) { event.accepted = false }   // newline
+                else if (enter && (event.modifiers & Qt.ControlModifier)) { root.secondary(root.selected()); event.accepted = true }
+                else if (enter) { root.activate(); event.accepted = true }
+                else if (event.key === Qt.Key_Up && root.mode === "search") { root.move(-1); event.accepted = true }
+                else if (event.key === Qt.Key_Down && root.mode === "search") { root.move(1); event.accepted = true }
+                else if (event.key === Qt.Key_N && (event.modifiers & Qt.ControlModifier)) { root.newChat(); event.accepted = true }
+              }
+
+              Text {
+                visible: input.text === "" && input.preeditText === ""
+                textFormat: Text.PlainText
+                text: root.mode === "chat" ? "Ask a follow-up…" : "Search Omarchy help, or ask a question…"
+                color: root.foreground
+                opacity: 0.5
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.heading
+              }
+            }
           }
         }
 
-        // ---- body: results, or the answer ----
+        // ---- chat context line ----
+        Row {
+          width: parent.width
+          visible: root.mode === "chat"
+          spacing: Style.spacing.rowGap
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            width: parent.width - chatActions.width - parent.spacing
+            textFormat: Text.PlainText
+            text: root.chatHeading ? "Reading:  " + root.chatHeading + (root.chatSource ? "   ·   " + root.chatSource : "") : "Picking a manual section…"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideMiddle
+          }
+          Row {
+            id: chatActions
+            spacing: Style.space(4)
+            Button { text: "Open manual"; bordered: true; fontSize: Style.font.caption; foreground: root.foreground; fontFamily: root.fontFamily; visible: root.chatSid !== ""; onClicked: root.openSection(root.chatSid) }
+            Button { text: "New chat"; bordered: true; fontSize: Style.font.caption; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.newChat() }
+            Button { text: "Back to search"; bordered: true; fontSize: Style.font.caption; foreground: root.foreground; fontFamily: root.fontFamily; onClicked: root.leaveChat() }
+          }
+        }
+
+        // ---- body: results, or the chat transcript ----
         Item {
           width: parent.width
-          height: parent.height - root.headerHeight - root.footerHeight - root.contentSpacing * 2
+          height: parent.height - inputBox.height - root.footerHeight - root.contentSpacing * 2
+                  - (root.mode === "chat" ? chatActions.height + root.contentSpacing : 0)
 
           ListView {
             id: resultList
             anchors.fill: parent
-            visible: !root.answering
+            visible: root.mode === "search"
             model: results
             clip: true
             boundsBehavior: Flickable.StopAtBounds
             spacing: Style.space(2)
 
             delegate: Rectangle {
+              id: row
+              required property int index
+              required property var model
+              readonly property bool current: index === root.selectedIndex && model.kind !== "hint"
               width: resultList.width
               height: model.secondary ? Style.space(44) : Style.space(30)
               radius: Style.space(6)
-              color: (index === root.selectedIndex && model.kind !== "hint")
-                     ? root.selectedBackground : "transparent"
+              color: current ? root.selectedBackground : "transparent"
 
               MouseArea {
                 anchors.fill: parent
-                enabled: model.kind !== "hint"
-                onClicked: { root.selectedIndex = index; root.activate() }
-                onPositionChanged: root.selectedIndex = index
+                enabled: row.model.kind !== "hint"
+                hoverEnabled: true
+                onClicked: { root.selectedIndex = row.index; root.primary(root.selected()) }
+                onPositionChanged: root.selectedIndex = row.index
               }
 
               Row {
-                anchors.fill: parent
+                anchors.left: parent.left
+                anchors.right: actions.left
                 anchors.leftMargin: Style.space(8)
                 anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
                 spacing: Style.space(8)
 
                 Text {
                   anchors.verticalCenter: parent.verticalCenter
                   width: Style.space(18)
                   textFormat: Text.PlainText
-                  text: model.kind === "bind" ? "⌨"
-                      : model.kind === "command" ? "❯"
-                      : model.kind === "section" ? "▤"
-                      : model.kind === "ask" ? "✦" : " "
-                  color: index === root.selectedIndex ? root.selectedText : root.foreground
+                  text: row.model.kind === "bind" ? "⌨"
+                      : row.model.kind === "command" ? "❯"
+                      : row.model.kind === "section" ? "▤"
+                      : row.model.kind === "ask" ? "✦" : " "
+                  color: row.current ? root.selectedText : root.foreground
                   opacity: 0.7
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
                 }
-
                 Column {
                   anchors.verticalCenter: parent.verticalCenter
-                  width: parent.width - Style.space(34)
+                  width: parent.width - Style.space(26)
                   spacing: Style.space(1)
-
                   Text {
                     width: parent.width
                     textFormat: Text.PlainText
-                    text: model.primary
-                    color: index === root.selectedIndex ? root.selectedText : root.foreground
-                    opacity: model.kind === "hint" ? 0.55 : 1
+                    text: row.model.primary
+                    color: row.current ? root.selectedText : root.foreground
+                    opacity: row.model.kind === "hint" ? 0.55 : 1
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
                     elide: Text.ElideRight
                   }
                   Text {
                     width: parent.width
-                    visible: !!model.secondary
+                    visible: !!row.model.secondary
                     textFormat: Text.PlainText
-                    text: model.secondary
-                    color: index === root.selectedIndex ? root.selectedText : root.foreground
+                    text: row.model.secondary
+                    color: row.current ? root.selectedText : root.foreground
                     opacity: 0.6
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
@@ -373,43 +501,97 @@ Item {
                   }
                 }
               }
+
+              // Per-row actions; shown on the selected row so the list stays quiet.
+              Row {
+                id: actions
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(4)
+                visible: row.current
+                Button {
+                  visible: text !== ""
+                  text: root.primaryLabel(row.model.kind)
+                  bordered: true; fontSize: Style.font.caption
+                  foreground: row.current ? root.selectedText : root.foreground; fontFamily: root.fontFamily
+                  onClicked: root.primary(results.get(row.index))
+                }
+                Button {
+                  visible: text !== ""
+                  text: root.secondaryLabel(row.model.kind)
+                  bordered: true; fontSize: Style.font.caption
+                  foreground: row.current ? root.selectedText : root.foreground; fontFamily: root.fontFamily
+                  onClicked: root.secondary(results.get(row.index))
+                }
+              }
             }
           }
 
-          // ---- answer view ----
-          Flickable {
+          ListView {
+            id: transcript
             anchors.fill: parent
-            visible: root.answering
-            contentHeight: answerCol.height
+            visible: root.mode === "chat"
+            model: messages
             clip: true
             boundsBehavior: Flickable.StopAtBounds
+            spacing: Style.space(10)
 
-            Column {
-              id: answerCol
-              width: parent.width
-              spacing: Style.space(8)
+            delegate: Column {
+              id: msg
+              required property int index
+              required property var model
+              readonly property bool mine: model.role === "user"
+              readonly property bool streaming: index === root.streamIndex && root.chatBusy
+              width: transcript.width
+              spacing: Style.space(3)
 
               Text {
-                width: parent.width
-                // The search line above already shows the question; repeating
-                // it as the answer heading just prints it twice.
-                visible: !!root.answerTitle && root.answerTitle !== root.filterText
                 textFormat: Text.PlainText
-                text: root.answerTitle
-                color: root.foreground
+                text: msg.mine ? "You" : "Local agent"
+                color: root.dim
                 font.family: root.fontFamily
-                font.pixelSize: Style.font.heading
-                wrapMode: Text.WordWrap
+                font.pixelSize: Style.font.caption
+                font.bold: true
               }
-              Text {
+              Rectangle {
                 width: parent.width
-                textFormat: Text.PlainText
-                text: root.answerBusy ? "Thinking… (the local model is answering)" : root.answerText
-                color: root.foreground
-                opacity: root.answerBusy ? 0.6 : 1
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-                wrapMode: Text.WordWrap
+                height: body.implicitHeight + Style.space(16)
+                radius: Style.space(8)
+                color: msg.mine ? root.faint : "transparent"
+                border.width: msg.mine ? 0 : 1
+                border.color: root.border
+                Text {
+                  id: body
+                  anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top
+                  anchors.margins: Style.space(8)
+                  textFormat: msg.mine ? Text.PlainText : Text.MarkdownText
+                  text: msg.model.text ? msg.model.text
+                      : (msg.streaming ? (root.chatSlow ? "Still waiting for the local model. An agent may be using it right now…" : "Thinking…") : "")
+                  color: root.foreground
+                  opacity: msg.model.text ? 1 : 0.6
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                  wrapMode: Text.Wrap
+                }
+              }
+              Row {
+                visible: !msg.mine && msg.model.sid !== ""
+                spacing: Style.space(6)
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: "Source:  " + msg.model.heading + "  ·  " + msg.model.source
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  elide: Text.ElideMiddle
+                }
+                Button {
+                  text: "Open manual"; bordered: true; fontSize: Style.font.caption
+                  foreground: root.foreground; fontFamily: root.fontFamily
+                  onClicked: root.openSection(msg.model.sid)
+                }
               }
             }
           }
@@ -421,20 +603,26 @@ Item {
           height: root.footerHeight
           Text {
             anchors.left: parent.left
+            anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             textFormat: Text.PlainText
-            text: root.answering
-                  ? "esc  back to results"
-                  : "↑↓ move   ↵ explain or copy   esc close"
+            text: root.notice ? root.notice
+                : root.mode === "chat" ? "↵ send   ⇧↵ new line   ctrl+n new chat   esc back to search"
+                : (function() {
+                    var k = root.selectedKind
+                    var p = root.primaryLabel(k), s = root.secondaryLabel(k)
+                    var hint = p ? "↵ " + p.toLowerCase() : "↵ go"
+                    if (s) hint += "   ctrl+↵ " + s.toLowerCase()
+                    return "↑↓ move   " + hint + "   ⇧↵ new line   esc close"
+                  })()
             color: root.foreground
-            opacity: 0.5
+            opacity: root.notice ? 0.9 : 0.5
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
           }
         }
       }
     }
   }
-
-  property int footerHeight: Math.max(Style.space(18), Style.font.caption + Style.space(6))
 }

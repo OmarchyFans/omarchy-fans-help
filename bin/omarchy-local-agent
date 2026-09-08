@@ -366,6 +366,40 @@ def chat(cfg, system, user, max_tokens=None, temperature=None):
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
 
+def chat_stream(cfg, messages, max_tokens=None, temperature=None):
+    """Yield content deltas from a streaming completion (SSE over HTTP)."""
+    payload = json.dumps({
+        "messages": messages,
+        "temperature": cfg["temperature"] if temperature is None else temperature,
+        "max_tokens": max_tokens or cfg["max_tokens"],
+        "cache_prompt": True,
+        "stream": True,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }).encode()
+    req = urllib.request.Request(
+        f"{cfg['server']}/v1/chat/completions",
+        data=payload, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=cfg["timeout"]) as r:
+            for raw in r:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    delta = json.loads(data)["choices"][0].get("delta", {}).get("content")
+                except (ValueError, KeyError, IndexError):
+                    continue
+                if delta:
+                    yield delta
+    except urllib.error.URLError as e:
+        raise ServerDown(str(e)) from e
+    except TimeoutError as e:
+        raise ServerDown(f"timed out after {cfg['timeout']}s") from e
+
+
 SECTION_RE = re.compile(r"[0-9a-z][0-9a-z-]*#\d+")
 CHAPTER_RE = re.compile(r"\b(\d{2}-[a-z0-9-]+|skill-[a-z0-9-]+)\b")
 
@@ -691,6 +725,267 @@ def explain_section(sid, query):
     return 0
 
 
+CHAT_SUFFIX = """
+
+You are now in a back-and-forth conversation. Use the conversation so far for \
+context. When a command or keybinding solves the problem, put it on its own line."""
+
+NOT_RUNNING = ("The local model is not running.\n\n"
+               "Start it with:  systemctl --user start omarchy-local-agent")
+
+
+def chat_context(db, cfg, system, query, sid):
+    """Pick the evidence for one chat turn: a manual section (kept from the
+    previous turn when the GUI passes its sid, navigated otherwise) plus the
+    best keybinding/command cards from the index."""
+    res = retrieve(db, query, cfg)
+    sec = get_section(db, sid) if sid else None
+    if sec is None:
+        sec, _ = navigate(db, cfg, system, query, res["sections"])
+        if sec is None and res["sections"]:
+            sec = res["sections"][0]
+    cards = [f"keybinding {b['keys']}: {b['description']}"
+             for b in near_best(res["binds"])[:3]]
+    cards += [f"command {cm['route']}: {cm['summary']}"
+              for cm in near_best(res["commands"])[:3]]
+    return sec, cards
+
+
+def chat_daemon():
+    """Conversation mode for the GUI. One JSON request per stdin line:
+        {"id": N, "query": "...", "history": [{"role","content"}...], "sid": "..."}
+    Replies are JSON lines keyed by the same id: {"status"} once evidence is
+    chosen, {"delta"} while the model streams, then {"done": true, "sid",
+    "heading", "source", "seconds"} or {"error", "hint", "fallback"}."""
+    cfg = load_config()
+    db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    system = None
+
+    def emit(obj):
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except ValueError:
+            emit({"error": "malformed request"})
+            continue
+        rid = req.get("id", 0)
+        query = str(req.get("query") or "").strip()
+        history = req.get("history") or []
+        sid = str(req.get("sid") or "")
+        if not query:
+            emit({"id": rid, "error": "empty question"})
+            continue
+        t0 = time.time()
+        sec = None
+        try:
+            if system is None:
+                system = build_system() + CHAT_SUFFIX
+            sec, cards = chat_context(db, cfg, system, query, sid)
+            emit({"id": rid, "status": "generating",
+                  "sid": sec["sid"] if sec else "",
+                  "heading": sec["heading"] if sec else "",
+                  "source": sec["source"] if sec else ""})
+            ctx = ""
+            if sec:
+                ctx += (f"MANUAL SECTION {sec['sid']} ({sec['chapter']} - {sec['heading']}):\n"
+                        f"{sec['body'][:cfg['max_inject_chars']]}\n\n")
+            if cards:
+                ctx += "MATCHING CARDS FROM THE INDEX:\n" + "\n".join(cards) + "\n\n"
+            user = (f"{ctx}QUESTION: {query}\n\n"
+                    "Answer from the material above and the conversation so far. "
+                    "If they do not contain the answer, say so.")
+            messages = [{"role": "system", "content": system}]
+            for h in history[-8:]:
+                if h.get("role") in ("user", "assistant") and h.get("content"):
+                    messages.append({"role": h["role"],
+                                     "content": str(h["content"])[:4000]})
+            messages.append({"role": "user", "content": user})
+
+            hidden = False
+            for delta in chat_stream(cfg, messages, max_tokens=cfg["max_tokens"] * 2):
+                # Drop a reasoning block if the template emitted one anyway.
+                if "<think>" in delta:
+                    hidden = True
+                if hidden:
+                    if "</think>" in delta:
+                        hidden = False
+                    continue
+                emit({"id": rid, "delta": delta})
+            emit({"id": rid, "done": True,
+                  "sid": sec["sid"] if sec else "",
+                  "heading": sec["heading"] if sec else "",
+                  "source": sec["source"] if sec else "",
+                  "seconds": round(time.time() - t0, 1)})
+        except ServerDown as e:
+            out = {"id": rid, "error": f"{NOT_RUNNING}\n\n{e}",
+                   "hint": "systemctl --user start omarchy-local-agent"}
+            if sec:
+                out.update({"sid": sec["sid"], "heading": sec["heading"],
+                            "source": sec["source"],
+                            "fallback": sec["body"][:1500]})
+            emit(out)
+        except Exception as e:  # one bad turn must never kill the daemon
+            emit({"id": rid, "error": str(e)})
+
+
+# --------------------------------------------------------------------------
+# opening things: a manual section in a pager, a command in a terminal
+# --------------------------------------------------------------------------
+
+MAX_SECTION = 4000  # must match omarchy-local-agent-index
+
+
+def _line_at(text, offset):
+    return text.count("\n", 0, offset) + 1
+
+
+def _first_ink(text, offset, body):
+    """Offset of the first non-blank character of a body that starts at offset."""
+    return offset + (len(body) - len(body.lstrip()))
+
+
+def section_lines(text, strip_h1):
+    """Mirror of the indexer's split_sections that records, for every section
+    it would produce, the heading text and the 1-based line to open at. The
+    two must stay in step, so the index row is checked against the result."""
+    if strip_h1:
+        # The indexer drops the H1; replacing it with "" keeps line numbers.
+        text = re.sub(r"^#\s+.+$", "", text, count=1, flags=re.MULTILINE)
+
+    def split_on(seg, base, pattern):
+        """(heading, body, body_base, open_at): body_base is the absolute
+        offset of body inside text, open_at the offset of the line to open."""
+        out = []
+        ms = list(re.finditer(pattern, seg, flags=re.MULTILINE))
+        pre = seg[:ms[0].start()] if ms else seg
+        if pre.strip():
+            out.append((None, pre, base, _first_ink(seg, base, pre)))
+        for i, m in enumerate(ms):
+            end = ms[i + 1].start() if i + 1 < len(ms) else len(seg)
+            body = seg[m.end():end]
+            if body.strip():
+                out.append((m.group(1).strip(), body, base + m.end(), base + m.start()))
+        return out
+
+    def paragraphs(heading, body, line):
+        chunks, cur = [], ""
+        for para in body.split("\n\n"):
+            if cur and len(cur) + len(para) + 2 > MAX_SECTION:
+                chunks.append(cur.strip())
+                cur = para
+            else:
+                cur = f"{cur}\n\n{para}" if cur else para
+        if cur.strip():
+            chunks.append(cur.strip())
+        if len(chunks) == 1:
+            return [(heading, line)]
+        out, pos = [], 0
+        for i, ch in enumerate(chunks):
+            at = text.find(ch[:80], pos)
+            pos = at + 1 if at >= 0 else pos
+            title = f"{heading} ({i + 1}/{len(chunks)})" if heading else None
+            out.append((title, _line_at(text, at) if at >= 0 else line))
+        return out
+
+    out = []
+    for heading, body, body_base, open_at in split_on(text, 0, r"^##\s+(.+)$"):
+        line = _line_at(text, open_at)
+        stripped = body.strip()
+        if len(stripped) <= MAX_SECTION:
+            out.append((heading, line))
+            continue
+        sub = split_on(body, body_base, r"^###\s+(.+)$")
+        if len(sub) > 1:
+            for sh, sb, _, sopen in sub:
+                sline = _line_at(text, sopen)
+                title = sh or heading
+                if len(sb.strip()) > MAX_SECTION:
+                    out.extend(paragraphs(title, sb.strip(), sline))
+                else:
+                    out.append((title, sline))
+        else:
+            out.extend(paragraphs(heading, stripped, line))
+    return out
+
+
+def section_location(db, sid):
+    """Return (path, line, section) for a section id, or None."""
+    sec = get_section(db, sid)
+    if sec is None:
+        return None
+    src = sec["source"]
+    path = os.path.join(ROOT, src) if src.startswith("manual/") else src
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError:
+        return None
+    line = 1
+    try:
+        idx = int(sid.rsplit("#", 1)[1])
+        rows = section_lines(text, strip_h1=src.startswith("manual/"))
+        heading, cand = rows[idx]
+        if (heading or sec["chapter"]) == sec["heading"]:
+            line = cand
+        else:
+            raise ValueError("index and split disagree")
+    except (ValueError, IndexError):
+        # Fall back to the heading text; the first occurrence is the best guess.
+        want = re.sub(r" \(\d+/\d+\)$", "", sec["heading"])
+        for n, l in enumerate(text.splitlines(), 1):
+            if re.match(r"^#{2,3}\s+" + re.escape(want) + r"\s*$", l):
+                line = n
+                break
+    return path, line, sec
+
+
+def spawn(argv):
+    import subprocess
+    subprocess.Popen(argv, start_new_session=True, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def open_section(sid, print_only=False):
+    """Open the manual file at the section's heading in a floating terminal."""
+    db = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+    loc = section_location(db, sid)
+    if loc is None:
+        print(f"No such section: {sid}", file=sys.stderr)
+        return 1
+    path, line, sec = loc
+    argv = ["omarchy-launch-tui", "--app-id=TUI.float",
+            "nvim", "-R", f"+{line}", "-c", "normal! zt", path]
+    if print_only:
+        print(json.dumps({"sid": sid, "heading": sec["heading"], "path": path,
+                          "line": line, "argv": argv}))
+        return 0
+    spawn(argv)
+    return 0
+
+
+RUN_SCRIPT = ('read -e -i "$OH_CMD" -p "$ " line && eval "$line"; '
+              'echo; read -rp "Press Enter to close "')
+
+
+def run_command(cmd, print_only=False):
+    """Open a floating terminal with the command pre-filled on an editable
+    prompt: Enter runs it, the user can fix placeholders first. The command
+    travels in the environment, never through a shell string."""
+    argv = ["omarchy-launch-tui", "--app-id=TUI.float",
+            "env", f"OH_CMD={cmd}", "bash", "-c", RUN_SCRIPT]
+    if print_only:
+        print(json.dumps({"cmd": cmd, "argv": argv}))
+        return 0
+    spawn(argv)
+    return 0
+
+
 def main():
     p = argparse.ArgumentParser(description="Local offline Omarchy assistant")
     p.add_argument("query", nargs="*", help="question to answer")
@@ -699,6 +994,14 @@ def main():
                    help="read queries on stdin, emit JSON results per line")
     p.add_argument("--explain-section", metavar="SID",
                    help="answer using this section id (skips model navigation)")
+    p.add_argument("--chat-daemon", action="store_true",
+                   help="conversation mode: JSON requests on stdin, streamed JSON replies")
+    p.add_argument("--open-section", metavar="SID",
+                   help="open the manual at this section in a floating terminal")
+    p.add_argument("--run", metavar="CMD",
+                   help="open a floating terminal with CMD pre-filled and editable")
+    p.add_argument("--print", action="store_true",
+                   help="with --open-section/--run: print what would be launched")
     p.add_argument("--popup", action="store_true",
                    help="open the REPL in a floating terminal window")
     p.add_argument("--retrieve-only", action="store_true",
@@ -709,6 +1012,8 @@ def main():
 
     if args.popup:
         sys.exit(popup())
+    if args.run is not None:
+        sys.exit(run_command(args.run, print_only=args.print))
 
     if not os.path.exists(DB):
         sys.exit("No index. Run: omarchy-local-agent-index")
@@ -716,6 +1021,11 @@ def main():
     if args.search_daemon:
         search_daemon()
         return
+    if args.chat_daemon:
+        chat_daemon()
+        return
+    if args.open_section:
+        sys.exit(open_section(args.open_section, print_only=args.print))
 
     if args.explain_section:
         sys.exit(explain_section(args.explain_section, " ".join(args.query)))

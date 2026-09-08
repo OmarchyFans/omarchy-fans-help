@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.modpunk.omarchy-help",
   "name": "Omarchy Help",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "modpunk",
   "license": "MIT",
-  "description": "Offline help for Omarchy. Type to search your live keybindings, the omarchy CLI, and the manual for your installed version — results appear as you type, with no network and no model. Press Enter on a manual topic to have a local LLM explain it in plain language.",
+  "description": "Offline help for Omarchy, in a window that stays open. Type to search your live keybindings, the omarchy CLI, and the manual for your installed version; results appear as you type with no network and no model. Run a command straight from the results in a floating terminal, open the manual at the matching section, or chat with the local GPU model about what to do.",
   "kinds": [
     "panel",
     "bar-widget"
@@ -16,9 +16,13 @@
   },
   "barWidget": {
     "displayName": "Omarchy Help",
-    "description": "Bar button that opens offline help: live search over keybindings, commands and the manual.",
+    "description": "Bar button that opens Omarchy Help: search keybindings, commands and the manual; run, open, or chat.",
     "category": "System",
-    "aliases": ["help", "omarchy-help", "manual"],
+    "aliases": [
+      "help",
+      "omarchy-help",
+      "manual"
+    ],
     "allowMultiple": false,
     "defaultSection": "right"
   },
