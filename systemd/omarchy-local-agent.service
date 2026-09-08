@@ -1,0 +1,43 @@
+[Unit]
+Description=llama-server for the local Omarchy agent
+Documentation=https://github.com/ggml-org/llama.cpp
+
+[Service]
+Type=simple
+# Qwen3.8-4B-Distill won the bake-off: fastest prefill and 3/3 correct manual
+# navigation. See bench-results.txt.
+Environment=MODEL=%h/.local/share/omarchy-local-agent/models/Qwen3.8-4B-Distill-Q4_K_M.gguf
+
+# --ctx-size is set explicitly and small on purpose: these models advertise very
+#   large contexts and would otherwise allocate KV cache this workload never
+#   touches. The system prompt (3.0k measured) plus one injected section (~1k)
+#   plus the answer is ~4.5k, so 8192 has real headroom.
+# --cache-reuse keeps the static system prefix warm across queries, which is
+#   what makes the PageIndex navigation call nearly free.
+# --threads 8 = physical cores (fallback if layers spill to CPU).
+# --n-gpu-layers 99 offloads everything to the RTX 3050 Ti: prefill goes from
+#   39 t/s to ~1150 t/s, which is the difference between a 75s and a 2s cold
+#   start on the cached system prompt. 4GB VRAM fits a 2.6GB model plus KV.
+ExecStart=/usr/bin/llama-server \
+    --model ${MODEL} \
+    --host 127.0.0.1 \
+    --port 8080 \
+    --ctx-size 8192 \
+    --threads 8 \
+    --n-gpu-layers 99 \
+    --cache-reuse 256 \
+    --no-webui
+
+Restart=on-failure
+RestartSec=3
+
+# This service exists to keep data local; make that structural, not a promise.
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/omarchy-local-agent
+NoNewPrivileges=true
+MemoryHigh=20G
+
+[Install]
+WantedBy=default.target

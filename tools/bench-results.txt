@@ -1,0 +1,84 @@
+omarchy-local-agent model bake-off
+date:    2026-09-07T23:13:21-05:00
+cpu:     11th Gen Intel(R) Core(TM) i9-11900H @ 2.50GHz
+threads: 8
+ram:     31Gi total, 21Gi available
+
+=== Nemotron-3-Nano-4B-Q4_K_M.gguf (2.7G)
+warning: asserts enabled, performance may be affected
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| nemotron_h ?B Q4_K - Medium    |   2.63 GiB |     3.97 B | CPU        |       8 |           pp512 |         21.37 ± 0.76 |
+| nemotron_h ?B Q4_K - Medium    |   2.63 GiB |     3.97 B | CPU        |       8 |           tg128 |          8.74 ± 0.02 |
+
+
+=== Qwen3.5-4B-Q4_K_M.gguf (2.6G)
+warning: asserts enabled, performance may be affected
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| qwen35 4B Q4_K - Medium        |   2.54 GiB |     4.21 B | CPU        |       8 |           pp512 |         30.17 ± 1.89 |
+| qwen35 4B Q4_K - Medium        |   2.54 GiB |     4.21 B | CPU        |       8 |           tg128 |          8.06 ± 0.03 |
+
+
+=== Qwen3.8-27B-UD-IQ4_XS.gguf (14G)
+warning: asserts enabled, performance may be affected
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| qwen35 27B IQ4_XS - 4.25 bpw   |  13.26 GiB |    27.32 B | CPU        |       8 |           pp512 |          2.11 ± 0.01 |
+| qwen35 27B IQ4_XS - 4.25 bpw   |  13.26 GiB |    27.32 B | CPU        |       8 |           tg128 |          1.43 ± 0.01 |
+
+
+=== Qwen3.8-4B-Distill-Q4_K_M.gguf (2.6G)
+warning: asserts enabled, performance may be affected
+| model                          |       size |     params | backend    | threads |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | ------: | --------------: | -------------------: |
+| qwen35 4B Q4_K - Medium        |   2.58 GiB |     4.33 B | CPU        |       8 |           pp512 |         39.63 ± 0.45 |
+| qwen35 4B Q4_K - Medium        |   2.58 GiB |     4.33 B | CPU        |       8 |           tg128 |          7.65 ± 0.11 |
+
+
+=== prose smoke: Nemotron-3-Nano-4B-Q4_K_M.gguf
+  [180.278s] how do I record my screen
+    nav=ERROR timed out after 180s
+    WARNING: navigation failed
+  [180.305s] how do I stop my laptop going to sleep
+    nav=ERROR timed out after 180s
+    WARNING: navigation failed
+  [52.203s] how does the clipboard history work
+    nav=08-unified-clipboard-history#0 raw='08-unified-clipboard-history#0'
+
+=== prose smoke: Qwen3.5-4B-Q4_K_M.gguf
+  [158.488s] how do I record my screen
+    nav=12-screenshots-recording#2 raw='12-screenshots-recording#2'
+  [7.864s] how do I stop my laptop going to sleep
+    nav=36-system-sleep#0 raw='36-system-sleep#0'
+  [7.681s] how does the clipboard history work
+    nav=08-unified-clipboard-history#0 raw='08-unified-clipboard-history#0'
+
+=== prose smoke: Qwen3.8-27B-UD-IQ4_XS.gguf
+  [180.238s] how do I record my screen
+    nav=ERROR timed out after 180s
+    WARNING: navigation failed
+  [180.298s] how do I stop my laptop going to sleep
+    nav=ERROR timed out after 180s
+    WARNING: navigation failed
+  [180.372s] how does the clipboard history work
+    nav=ERROR timed out after 180s
+    WARNING: navigation failed
+
+=== prose smoke: Qwen3.8-4B-Distill-Q4_K_M.gguf
+  [127.870s] how do I record my screen
+    nav=skill-capture#2 raw='skill-capture#2'
+  [7.300s] how do I stop my laptop going to sleep
+    nav=13-toggles-idle-screensaver#5 raw='13-toggles-idle-screensaver#5'
+  [6.788s] how does the clipboard history work
+    nav=08-unified-clipboard-history#0 raw='08-unified-clipboard-history#0'
+
+
+--- reading this ---
+Take pp (t/s) from the winning model and set the injection budget:
+
+    max_inject_chars ~= target_ttft_seconds * pp_tokens_per_sec * 4
+
+e.g. a 3s target at 150 t/s prefill -> ~1800 tokens -> ~7200 chars.
+Then edit ~/.config/omarchy-local-agent/config.json and re-run:
+    python3 ~/.local/share/omarchy-local-agent/eval.py

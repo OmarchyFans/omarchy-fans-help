@@ -30,6 +30,24 @@ adds a Hyprland rule that floats it. The chat and explain features need the
 local model from the `omarchy-local-agent` service; search, run, and open work
 without it.
 
+## What can run from the panel
+
+The user chose this model, and it applies to every execution path: an
+**allowlist plus a confirmation per step**, never a plain denylist.
+
+- **Run at once:** an `omarchy …` command the index knows, with no
+  placeholder left. Your click on that specific command is the confirmation.
+- **Editable prompt first:** anything else, including commands with a
+  `<placeholder>` and every non-omarchy command. Nothing runs until you press
+  Enter in the terminal.
+- **Refused, never run and never proposed:** `sudo`, `pkexec`, `doas`,
+  recursive `rm`, `dd`, `mkfs`, power commands, system-level `systemctl`, and
+  any write to `/usr`, `/etc`, `/boot`, `/dev`. Writes only under `$HOME`.
+
+Chat answers list the commands they contain as separate "Run" buttons, one
+click per step; refused ones show as blocked. `omarchy-local-agent --check
+'<cmd>'` prints the verdict the panel would apply.
+
 ## Keys
 
 | Key | Search view | Chat view |
@@ -55,5 +73,22 @@ omarchy-local-agent --run 'omarchy theme set <name>'   # terminal with the comma
 ```
 
 `--search-daemon` and `--chat-daemon` are the JSON-lines interfaces the window
-uses. Configuration lives in `~/.config/omarchy-local-agent/config.json`
+uses. `--check CMD` prints the execution-policy verdict. Configuration lives in `~/.config/omarchy-local-agent/config.json`
 (server URL, temperature, token and injection budgets).
+
+## Repository layout
+
+| Path | What |
+|------|------|
+| `HelpPanel.qml`, `BarWidget.qml`, `manifest.json` | the plugin (a thin client over the CLI) |
+| `bin/omarchy-local-agent` | search, chat, explain, open, run, policy |
+| `bin/omarchy-local-agent-index` | builds the index; keeps the bind-count and corpus-collapse guards |
+| `tools/eval.py` | retrieval regression harness: run after any change to retrieval, ranking, stopwords, weights or the outline; report the held-out number, never tune against it |
+| `tools/bench.sh`, `tools/bench-results.txt` | the model bake-off (Qwen3.8-4B-Distill won) |
+| `docs/local-agent.md` | the CLI's own design notes |
+| `systemd/omarchy-local-agent.service` | llama-server user unit (GPU offload, hardened) |
+| `hooks/refresh-agent-index` | post-update hook that rebuilds the index |
+| `config.example.json` | tuned retrieval thresholds |
+
+The manual is pinned to the installed Omarchy version's git tag on purpose;
+do not point the indexer at master.

@@ -1,0 +1,6 @@
+#!/bin/bash
+# Rebuild the local agent index after an Omarchy update, so the manual it
+# answers from tracks the version actually installed.
+# Absolute path on purpose: this runs under whatever environment `omarchy
+# update` inherits, which is not guaranteed to include ~/.local/bin.
+exec "$HOME/.local/bin/omarchy-local-agent-index"

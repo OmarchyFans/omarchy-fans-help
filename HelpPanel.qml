@@ -185,6 +185,7 @@ Item {
   // The command opens on an editable prompt in a floating terminal: Enter
   // runs it, placeholders can be fixed first. The CLI builds the argv.
   function runCommand(cmd) {
+    if (refusedRe.test(cmd)) { flash("Blocked by policy:  " + cmd); return }
     Quickshell.execDetached([agent, "--run", cmd])
     flash("Opened a terminal with  " + cmd)
   }
@@ -194,6 +195,30 @@ Item {
     flash("Opening the manual at that section")
   }
   function flash(text) { notice = text; noticeTimer.restart() }
+
+  // Commands an answer proposes, one button per step: the click is the
+  // confirmation, the CLI's policy decides run / prompt / refuse.
+  readonly property var refusedRe: /(^|[\s;&|(`$])(sudo|pkexec|doas|su|dd|mkfs|reboot|shutdown|poweroff|halt)(\s|\.|$)|(^|[\s;&|(`$])rm\s+-[A-Za-z]*[rR]|(^|[\s;&|(`$])systemctl\s+(?!--user)/
+  function extractSteps(text) {
+    var out = [], seen = {}
+    if (!text) return out
+    var lines = String(text).split("\n"), inFence = false
+    function add(c) {
+      c = c.replace(/^\$\s*/, "").trim()
+      if (!c || seen[c] || c.length > 200) return
+      seen[c] = true
+      out.push({ cmd: c, refused: refusedRe.test(c) })
+    }
+    for (var i = 0; i < lines.length; i++) {
+      var l = lines[i].trim()
+      if (l.indexOf("```") === 0) { inFence = !inFence; continue }
+      if (inFence) { if (l && l.indexOf("#") !== 0) add(l); continue }
+      var m = l.match(/`([^`]*\bomarchy(?:-[a-z-]+)?\b[^`]*)`/)
+      if (m) { add(m[1]); continue }
+      if (/^\$\s+\S/.test(l) || /^omarchy(-[a-z-]+)?\s/.test(l)) add(l)
+    }
+    return out.slice(0, 8)
+  }
 
   // ---- chat ---------------------------------------------------------------
 
@@ -574,6 +599,30 @@ Item {
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.body
                   wrapMode: Text.Wrap
+                }
+              }
+              Column {
+                width: parent.width
+                visible: !msg.mine && !msg.streaming && steps.length > 0
+                spacing: Style.space(3)
+                readonly property var steps: (!msg.mine && !msg.streaming) ? root.extractSteps(msg.model.text) : []
+                Text {
+                  textFormat: Text.PlainText
+                  text: "Steps (each runs only when you click it):"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                Repeater {
+                  model: parent.steps
+                  delegate: Button {
+                    required property var modelData
+                    text: (modelData.refused ? "Blocked by policy:  " : "Run:  ") + (modelData.cmd.length > 90 ? modelData.cmd.slice(0, 90) + "…" : modelData.cmd)
+                    bordered: true; fontSize: Style.font.caption; leftAlign: true
+                    foreground: modelData.refused ? root.dim : root.foreground; fontFamily: root.fontFamily
+                    enabled: !modelData.refused
+                    onClicked: root.runCommand(modelData.cmd)
+                  }
                 }
               }
               Row {

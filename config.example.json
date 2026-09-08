@@ -1,0 +1,8 @@
+{
+  "server": "http://127.0.0.1:8080",
+  "max_inject_chars": 4000,
+  "fast_path_max_score": -6.0,
+  "fast_path_margin": 1.0,
+  "temperature": 0.2,
+  "max_tokens": 400
+}

@@ -12,6 +12,18 @@ mkdir -p "$HOME/.local/bin"
 install -m 755 "$HERE/bin/omarchy-local-agent" "$HERE/bin/omarchy-local-agent-index" "$HOME/.local/bin/"
 echo "installed CLI helpers into ~/.local/bin"
 
+# Runtime pieces are only added when missing: an existing unit or config may be tuned.
+U="$HOME/.config/systemd/user/omarchy-local-agent.service"
+if [[ ! -f $U ]]; then
+  mkdir -p "$(dirname "$U")" && cp "$HERE/systemd/omarchy-local-agent.service" "$U"
+  systemctl --user daemon-reload 2>/dev/null || true
+  echo "installed $U (enable with: systemctl --user enable --now omarchy-local-agent)"
+fi
+C="$HOME/.config/omarchy-local-agent/config.json"
+[[ -f $C ]] || { mkdir -p "$(dirname "$C")" && cp "$HERE/config.example.json" "$C" && echo "installed $C"; }
+HK="$HOME/.config/omarchy/hooks/post-update.d/refresh-agent-index"
+mkdir -p "$(dirname "$HK")" && install -m 755 "$HERE/hooks/refresh-agent-index" "$HK"
+
 B="$HOME/.config/hypr/bindings.lua"
 BIND="o.bind(\"SUPER + CTRL + SHIFT + L\", \"Omarchy help\", \"omarchy-shell shell summon $MARK '{}'\")"
 if [[ -f $B ]] && grep -q "$MARK" "$B"; then

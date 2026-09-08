@@ -971,19 +971,86 @@ def open_section(sid, print_only=False):
 
 # A command with no <placeholder> runs at once; one with placeholders is put
 # on an editable prompt so they can be filled in before Enter.
-RUN_SCRIPT = ('if [[ $OH_CMD == *"<"* ]]; then read -e -i "$OH_CMD" -p "$ " line; '
-              'else line=$OH_CMD; printf "$ %s\\n" "$line"; fi; '
+# --------------------------------------------------------------------------
+# execution policy
+# --------------------------------------------------------------------------
+# The user chose this model for anything the panel executes: an allowlist
+# (commands the index knows) plus a human confirmation per step, never a plain
+# denylist. Refused patterns are never run, never proposed, never put on the
+# prompt. Writes only under $HOME.
+
+REFUSE = [
+    (r"(^|[\s;&|(`$])(sudo|pkexec|doas|su)(\s|$)", "privilege escalation is never run from the help panel"),
+    (r"(^|[\s;&|(`$])rm\s+-[A-Za-z]*[rR]", "recursive rm is never run from the help panel"),
+    (r"(^|[\s;&|(`$])dd(\s|$)", "dd is never run from the help panel"),
+    (r"(^|[\s;&|(`$])mkfs(\.|\s|$)", "mkfs is never run from the help panel"),
+    (r"(^|[\s;&|(`$])(reboot|shutdown|poweroff|halt)(\s|$)", "power commands are never run from the help panel"),
+    (r"(^|[\s;&|(`$])systemctl\s+(?!--user)", "system-level systemctl needs root; not run from the help panel"),
+    (r"(>>?|\b(tee|cp|mv|install|ln|chmod|chown|mkdir|touch|rmdir|sed\s+-i[^ ]*))\s*[^;&|]*?\s?/(usr|etc|boot|dev)(/|\s|$)",
+     "writes outside $HOME are never run from the help panel"),
+]
+
+
+def command_policy(cmd, db=None):
+    """Return {"verdict": "run" | "prompt" | "refuse", "reason": str}.
+
+    run     allowlisted (an `omarchy` route the index knows) and complete
+    prompt  anything else that is not refused: shown on an editable prompt
+    refuse  matches a hard-refuse pattern; never executed
+    """
+    c = " ".join(cmd.strip().split())
+    if not c:
+        return {"verdict": "refuse", "reason": "empty command"}
+    for pat, why in REFUSE:
+        if re.search(pat, c):
+            return {"verdict": "refuse", "reason": why}
+    if "<" in c:
+        return {"verdict": "prompt", "reason": "has a placeholder to fill in"}
+    known = False
+    try:
+        own = db or sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+        for (route,) in own.execute("SELECT route FROM commands"):
+            r = " ".join(str(route).split())
+            if c == r or c.startswith(r + " "):
+                known = True
+                break
+    except sqlite3.Error:
+        known = False
+    if known:
+        return {"verdict": "run", "reason": "omarchy command from the index"}
+    return {"verdict": "prompt", "reason": "not an indexed omarchy command; confirm it on the prompt"}
+
+
+def notify(title, body):
+    try:
+        spawn(["omarchy-notification-send", "-u", "critical", title, body])
+    except OSError:
+        print(f"{title}: {body}", file=sys.stderr)
+
+
+RUN_SCRIPT = ('if [[ $OH_MODE == run ]]; then line=$OH_CMD; printf "$ %s\\n" "$line"; '
+              'else read -e -i "$OH_CMD" -p "$ " line; fi; '
               'eval "$line"; echo; read -rp "Press Enter to close "')
 
 
 def run_command(cmd, print_only=False):
-    """Open a floating terminal that runs the command, or, when it still has
-    <placeholders>, shows it on an editable prompt first. The command travels
-    in the environment, never through a shell string."""
+    """Open a floating terminal for one command, under command_policy():
+    an indexed omarchy command runs at once (the click was the confirmation),
+    anything else is shown on an editable prompt first, refused patterns
+    never run. The command travels in the environment, never through a shell
+    string."""
+    verdict = command_policy(cmd)
+    if verdict["verdict"] == "refuse":
+        if print_only:
+            print(json.dumps({"cmd": cmd, "argv": None, "policy": verdict}))
+            return 2
+        notify("Omarchy Help refused to run that", f"{cmd}\n{verdict['reason']}")
+        print(f"refused: {verdict['reason']}", file=sys.stderr)
+        return 2
     argv = ["omarchy-launch-tui", "--app-id=TUI.float",
-            "env", f"OH_CMD={cmd}", "bash", "-c", RUN_SCRIPT]
+            "env", f"OH_CMD={cmd}", f"OH_MODE={verdict['verdict']}", "bash", "-c", RUN_SCRIPT]
     if print_only:
-        print(json.dumps({"cmd": cmd, "argv": argv}))
+        print(json.dumps({"cmd": cmd, "argv": argv, "policy": verdict}))
         return 0
     spawn(argv)
     return 0
@@ -1003,6 +1070,8 @@ def main():
                    help="open the manual at this section in a floating terminal")
     p.add_argument("--run", metavar="CMD",
                    help="open a floating terminal with CMD pre-filled and editable")
+    p.add_argument("--check", metavar="CMD",
+                   help="print the execution-policy verdict for CMD as JSON")
     p.add_argument("--print", action="store_true",
                    help="with --open-section/--run: print what would be launched")
     p.add_argument("--popup", action="store_true",
@@ -1017,6 +1086,10 @@ def main():
         sys.exit(popup())
     if args.run is not None:
         sys.exit(run_command(args.run, print_only=args.print))
+    if args.check is not None:
+        v = command_policy(args.check)
+        print(json.dumps(dict(cmd=args.check, **v)))
+        sys.exit(0 if v["verdict"] != "refuse" else 2)
 
     if not os.path.exists(DB):
         sys.exit("No index. Run: omarchy-local-agent-index")
