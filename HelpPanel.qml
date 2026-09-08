@@ -196,28 +196,19 @@ Item {
   }
   function flash(text) { notice = text; noticeTimer.restart() }
 
-  // Commands an answer proposes, one button per step: the click is the
-  // confirmation, the CLI's policy decides run / prompt / refuse.
-  readonly property var refusedRe: /(^|[\s;&|(`$])(sudo|pkexec|doas|su|dd|mkfs|reboot|shutdown|poweroff|halt)(\s|\.|$)|(^|[\s;&|(`$])rm\s+-[A-Za-z]*[rR]|(^|[\s;&|(`$])systemctl\s+(?!--user)/
-  function extractSteps(text) {
-    var out = [], seen = {}
-    if (!text) return out
-    var lines = String(text).split("\n"), inFence = false
-    function add(c) {
-      c = c.replace(/^\$\s*/, "").trim()
-      if (!c || seen[c] || c.length > 200) return
-      seen[c] = true
-      out.push({ cmd: c, refused: refusedRe.test(c) })
-    }
-    for (var i = 0; i < lines.length; i++) {
-      var l = lines[i].trim()
-      if (l.indexOf("```") === 0) { inFence = !inFence; continue }
-      if (inFence) { if (l && l.indexOf("#") !== 0) add(l); continue }
-      var m = l.match(/`([^`]*\bomarchy(?:-[a-z-]+)?\b[^`]*)`/)
-      if (m) { add(m[1]); continue }
-      if (/^\$\s+\S/.test(l) || /^omarchy(-[a-z-]+)?\s/.test(l)) add(l)
-    }
-    return out.slice(0, 8)
+  // Last-resort guard mirroring the CLI's hard refusals; the CLI's
+  // command_policy() is the source of truth and runs again on every launch.
+  readonly property var refusedRe: /(^|[\s;&|(`$])(sudo|pkexec|doas|su|dd|mkfs|reboot|shutdown|poweroff|halt|shred)(\s|\.|$)|(^|[\s;&|(`$])rm\s+-[A-Za-z]*[rR]|(^|[\s;&|(`$])systemctl\s+(?!--user)|\|\s*(sh|bash|zsh|fish|python3?)(\s|$)/
+  function stepsOf(json) { try { var v = JSON.parse(json || "[]"); return Array.isArray(v) ? v : [] } catch (e) { return [] } }
+  function stepNote(st) {
+    var parts = []
+    if (st.verdict === "refuse") parts.push(st.reason)
+    else if (st.verdict === "run") parts.push("allowlisted, runs on click")
+    else parts.push("opens on an editable prompt: " + st.reason)
+    if (st.writes && st.writes.length) parts.push("writes " + st.writes.join(", "))
+    if (st.reads && st.reads.length) parts.push("reads " + st.reads.join(", "))
+    if (st.resolved && st.resolved !== st.cmd) parts.push("filled in from  " + st.cmd)
+    return parts.join("   ·   ")
   }
 
   // ---- chat ---------------------------------------------------------------
@@ -254,8 +245,8 @@ Item {
       var m = messages.get(i)
       if (m.text) history.push({ role: m.role, content: m.text })
     }
-    messages.append({ role: "user", text: query, sid: "", heading: "", source: "" })
-    messages.append({ role: "assistant", text: "", sid: "", heading: "", source: "" })
+    messages.append({ role: "user", text: query, sid: "", heading: "", source: "", steps: "[]" })
+    messages.append({ role: "assistant", text: "", sid: "", heading: "", source: "", steps: "[]" })
     streamIndex = messages.count - 1
     chatBusy = true; chatSlow = false; slowTimer.restart()
     requestId++
@@ -279,7 +270,12 @@ Item {
       transcript.positionViewAtEnd()
       return
     }
-    if (d.done) { stamp(d); finishWith(""); return }
+    if (d.done) {
+      stamp(d)
+      messages.setProperty(streamIndex, "steps", JSON.stringify(d.steps || []))
+      finishWith("")
+      return
+    }
     if (d.error) {
       var t = d.error
       if (d.fallback) t += "\n\nFrom the manual (" + (d.heading || "") + "):\n\n" + d.fallback
@@ -604,24 +600,40 @@ Item {
               Column {
                 width: parent.width
                 visible: !msg.mine && !msg.streaming && steps.length > 0
-                spacing: Style.space(3)
-                readonly property var steps: (!msg.mine && !msg.streaming) ? root.extractSteps(msg.model.text) : []
+                spacing: Style.space(6)
+                readonly property var steps: root.stepsOf(msg.model.steps)
                 Text {
                   textFormat: Text.PlainText
-                  text: "Steps (each runs only when you click it):"
+                  text: "Steps. Each one runs only when you click it; what it touches is shown first."
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                 }
                 Repeater {
                   model: parent.steps
-                  delegate: Button {
+                  delegate: Column {
+                    id: step
                     required property var modelData
-                    text: (modelData.refused ? "Blocked by policy:  " : "Run:  ") + (modelData.cmd.length > 90 ? modelData.cmd.slice(0, 90) + "…" : modelData.cmd)
-                    bordered: true; fontSize: Style.font.caption; leftAlign: true
-                    foreground: modelData.refused ? root.dim : root.foreground; fontFamily: root.fontFamily
-                    enabled: !modelData.refused
-                    onClicked: root.runCommand(modelData.cmd)
+                    readonly property string cmd: modelData.resolved || modelData.cmd
+                    readonly property bool blocked: modelData.verdict === "refuse"
+                    width: parent.width
+                    spacing: Style.space(1)
+                    Button {
+                      text: (step.blocked ? "Blocked:  " : "Run:  ") + (step.cmd.length > 90 ? step.cmd.slice(0, 90) + "…" : step.cmd)
+                      bordered: true; fontSize: Style.font.caption; leftAlign: true
+                      foreground: step.blocked ? root.dim : root.foreground; fontFamily: root.fontFamily
+                      enabled: !step.blocked
+                      onClicked: root.runCommand(step.cmd)
+                    }
+                    Text {
+                      width: parent.width
+                      textFormat: Text.PlainText
+                      text: root.stepNote(step.modelData)
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      wrapMode: Text.Wrap
+                    }
                   }
                 }
               }

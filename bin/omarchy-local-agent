@@ -808,6 +808,7 @@ def chat_daemon():
             messages.append({"role": "user", "content": user})
 
             hidden = False
+            answer_text = ""
             for delta in chat_stream(cfg, messages, max_tokens=cfg["max_tokens"] * 2):
                 # Drop a reasoning block if the template emitted one anyway.
                 if "<think>" in delta:
@@ -816,8 +817,12 @@ def chat_daemon():
                     if "</think>" in delta:
                         hidden = False
                     continue
+                answer_text += delta
                 emit({"id": rid, "delta": delta})
+            transcript = messages[1:-1] + [{"role": "user", "content": query},
+                                           {"role": "assistant", "content": answer_text}]
             emit({"id": rid, "done": True,
+                  "steps": analyse_steps(cfg, system, transcript, answer_text, db),
                   "sid": sec["sid"] if sec else "",
                   "heading": sec["heading"] if sec else "",
                   "source": sec["source"] if sec else "",
@@ -988,7 +993,158 @@ REFUSE = [
     (r"(^|[\s;&|(`$])systemctl\s+(?!--user)", "system-level systemctl needs root; not run from the help panel"),
     (r"(>>?|\b(tee|cp|mv|install|ln|chmod|chown|mkdir|touch|rmdir|sed\s+-i[^ ]*))\s*[^;&|]*?\s?/(usr|etc|boot|dev)(/|\s|$)",
      "writes outside $HOME are never run from the help panel"),
+    (r"\|\s*(sudo\s+)?(sh|bash|zsh|fish|dash|ksh|python3?|perl|ruby|node)(\s|$)",
+     "piping into a shell or interpreter is never run from the help panel"),
+    (r"(^|[\s;&|(`$])find(\s|$)[^;&|]*\s-delete(\s|$)", "find -delete is unrecoverable deletion; never run from the help panel"),
+    (r"(^|[\s;&|(`$])shred(\s|$)", "shred is unrecoverable deletion; never run from the help panel"),
+    (r":\s*\(\s*\)\s*\{", "fork bomb; never run from the help panel"),
+    (r"/etc/g?shadow(\s|$)", "credential files are never read from the help panel"),
 ]
+
+HOME_MARKS = ("~", "$HOME", "${HOME}")
+
+
+def _expand(path):
+    for m in HOME_MARKS:
+        if path == m or path.startswith(m + "/"):
+            return HOME + path[len(m):]
+    return path
+
+
+def under_home(path):
+    """True for a path strictly inside $HOME (the home root itself is not)."""
+    p = os.path.normpath(_expand(path))
+    return p.startswith(HOME + "/")
+
+
+def recursive_perm_target(cmd):
+    """The user's rule: a recursive chmod/chown/chgrp is a machine-wrecker
+    unless every target is inside $HOME. Returns a reason or None."""
+    for m in re.finditer(r"(^|[\s;&|(`$])(chmod|chown|chgrp)\s+([^;&|]*)", cmd):
+        args = m.group(3).split()
+        flags = [a for a in args if a.startswith("-")]
+        if not any(a == "--recursive" or (a.startswith("-") and not a.startswith("--") and "R" in a)
+                   for a in flags):
+            continue
+        rest = [a for a in args if not a.startswith("-")]
+        targets = rest[1:]                       # first non-flag is the mode/owner
+        if not targets or any(not under_home(t) for t in targets):
+            return f"recursive {m.group(2)} outside $HOME is never run from the help panel"
+    return None
+
+
+WRITE_VERBS = {"cp", "mv", "install", "tee", "mkdir", "touch", "rm", "rmdir", "chmod", "chown",
+               "chgrp", "ln", "truncate", "dd"}
+
+
+def looks_like_path(tok):
+    t = tok.strip("'\"")
+    return (t.startswith(("/", "~", "$HOME", "./", "../")) or "/" in t) and not t.startswith("-") \
+        and not t.startswith(("http://", "https://"))
+
+
+def touches(cmd):
+    """Heuristic preview of what a command reads and writes, for the step
+    button. Shell redirections and the usual write verbs count as writes;
+    every other path-like token is listed as a read."""
+    import shlex
+    try:
+        toks = shlex.split(cmd)
+    except ValueError:
+        toks = cmd.split()
+    reads, writes = [], []
+    verb, expect_write = None, False
+    for i, t in enumerate(toks):
+        if t in (";", "&&", "||", "|", "&"):
+            verb, expect_write = None, False
+            continue
+        if t in (">", ">>", "-o", "--output"):
+            expect_write = True
+            continue
+        if t.startswith((">", ">>")) and len(t) > 1 and looks_like_path(t.lstrip(">")):
+            writes.append(_expand(t.lstrip(">")))
+            continue
+        if verb is None and not t.startswith("-"):
+            verb = t
+            continue
+        if not looks_like_path(t):
+            continue
+        p = _expand(t.strip("'\""))
+        if expect_write:
+            writes.append(p); expect_write = False
+        elif verb in WRITE_VERBS:
+            # cp/mv/install write their last operand, the rest are reads
+            later = [x for x in toks[i + 1:] if looks_like_path(x)]
+            (writes if (verb not in ("cp", "mv", "install") or not later) else reads).append(p)
+        else:
+            reads.append(p)
+    dedupe = lambda xs: list(dict.fromkeys(xs))
+    return dedupe(reads), dedupe(writes)
+
+
+STEP_INLINE = re.compile(r"`([^`]*\bomarchy(?:-[a-z-]+)?\b[^`]*)`")
+
+
+def extract_steps(text):
+    """Commands an answer proposes: fenced code lines, `$ …` lines, lines
+    starting with omarchy, and inline `omarchy …` spans. Mirrors what the
+    panel shows as one Run button per step."""
+    out, seen, fence = [], set(), False
+
+    def add(c):
+        c = re.sub(r"^\$\s*", "", c).strip()
+        if c and c not in seen and len(c) <= 200:
+            seen.add(c); out.append(c)
+
+    for raw in (text or "").splitlines():
+        l = raw.strip()
+        if l.startswith("```"):
+            fence = not fence; continue
+        if fence:
+            if l and not l.startswith("#"):
+                add(l)
+            continue
+        m = STEP_INLINE.search(l)
+        if m:
+            add(m.group(1)); continue
+        if re.match(r"^\$\s+\S", l) or re.match(r"^omarchy(-[a-z-]+)?\s", l):
+            add(l)
+    return out[:8]
+
+
+def fill_placeholders(cfg, system, transcript, cmd):
+    """The user chose "ask the model to fill in arguments": one greedy call
+    that must return the finished command or UNKNOWN. The result is shown
+    on the button before anything runs, and policy is applied to it."""
+    convo = "\n".join(f"{m['role']}: {m['content']}" for m in transcript[-8:])
+    user = (f"Conversation so far:\n{convo}\n\n"
+            f"Command template: {cmd}\n\n"
+            "Replace every <placeholder> with the concrete value the conversation "
+            "implies. Reply with the finished command on one line and nothing else. "
+            "If a value is not stated in the conversation, reply UNKNOWN.")
+    try:
+        raw = chat(cfg, system, user, max_tokens=80, temperature=0.0)
+    except ServerDown:
+        return None
+    line = raw.strip().splitlines()[0].strip().strip("`") if raw.strip() else ""
+    head = cmd.split()[0]
+    if not line or "UNKNOWN" in line.upper() or "<" in line or not line.startswith(head):
+        return None
+    return line
+
+
+def analyse_steps(cfg, system, transcript, text, db=None):
+    steps = []
+    for cmd in extract_steps(text):
+        resolved = None
+        if "<" in cmd and len(steps) < 4:
+            resolved = fill_placeholders(cfg, system, transcript, cmd)
+        final = resolved or cmd
+        v = command_policy(final, db)
+        reads, writes = touches(final)
+        steps.append({"cmd": cmd, "resolved": resolved or "", "verdict": v["verdict"],
+                      "reason": v["reason"], "reads": reads, "writes": writes})
+    return steps
 
 
 def command_policy(cmd, db=None):
@@ -1004,8 +1160,15 @@ def command_policy(cmd, db=None):
     for pat, why in REFUSE:
         if re.search(pat, c):
             return {"verdict": "refuse", "reason": why}
+    why = recursive_perm_target(c)
+    if why:
+        return {"verdict": "refuse", "reason": why}
     if "<" in c:
         return {"verdict": "prompt", "reason": "has a placeholder to fill in"}
+    # An allowlisted command is a plain argv, nothing the shell could expand:
+    # no ; & | $ ` ( ) < > \ or newline anywhere, quotes limited to simple words.
+    if not re.fullmatch(r"[\w\s./~@:=+,%'\"-]+", c):
+        return {"verdict": "prompt", "reason": "shell syntax in the command; confirm it on the prompt"}
     known = False
     try:
         own = db or sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
@@ -1088,7 +1251,8 @@ def main():
         sys.exit(run_command(args.run, print_only=args.print))
     if args.check is not None:
         v = command_policy(args.check)
-        print(json.dumps(dict(cmd=args.check, **v)))
+        reads, writes = touches(args.check)
+        print(json.dumps(dict(cmd=args.check, reads=reads, writes=writes, **v)))
         sys.exit(0 if v["verdict"] != "refuse" else 2)
 
     if not os.path.exists(DB):

@@ -41,12 +41,20 @@ The user chose this model, and it applies to every execution path: an
   `<placeholder>` and every non-omarchy command. Nothing runs until you press
   Enter in the terminal.
 - **Refused, never run and never proposed:** `sudo`, `pkexec`, `doas`,
-  recursive `rm`, `dd`, `mkfs`, power commands, system-level `systemctl`, and
+  recursive `rm`, `find -delete`, `shred`, `dd`, `mkfs`, power commands,
+  system-level `systemctl`, recursive `chmod`/`chown` outside `$HOME`, piping
+  anything into a shell or interpreter, fork bombs, reading `/etc/shadow`, and
   any write to `/usr`, `/etc`, `/boot`, `/dev`. Writes only under `$HOME`.
+  A "run" verdict also requires a plain argument string: any shell syntax
+  (`;`, `&&`, `|`, `$(…)`, backticks, redirections) drops it to the prompt.
 
 Chat answers list the commands they contain as separate "Run" buttons, one
-click per step; refused ones show as blocked. `omarchy-local-agent --check
-'<cmd>'` prints the verdict the panel would apply.
+click per step. Under each button the panel shows the verdict, what the
+command reads and writes, and, when the model filled in a `<placeholder>`
+from the conversation, the resolved command next to the template it came
+from, so the path is visible before anything runs. Refused steps show as
+blocked. `omarchy-local-agent --check '<cmd>'` prints the verdict and the
+read/write preview the panel would apply.
 
 ## Keys
 
