@@ -8,6 +8,21 @@ set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 MARK="io.github.modpunk.omarchy-help"
 
+cat <<MSG
+This will:
+  - copy omarchy-local-agent and omarchy-local-agent-index to ~/.local/bin
+  - append a SUPER + CTRL + SHIFT + L keybinding to ~/.config/hypr/bindings.lua
+  - append a float rule for the "Omarchy Help" window to ~/.config/hypr/looknfeel.lua
+  - install the post-update hook that rebuilds the index
+  - add the llama-server user unit and a config file only if they do not exist yet
+Every appended line carries the marker $MARK; uninstall.sh removes them.
+Backups of edited files are kept next to them.
+MSG
+if [[ ${1:-} != --yes ]]; then
+  read -rp "Continue? [y/N] " ans
+  [[ $ans == [yY]* ]] || { echo "nothing changed"; exit 0; }
+fi
+
 mkdir -p "$HOME/.local/bin"
 install -m 755 "$HERE/bin/omarchy-local-agent" "$HERE/bin/omarchy-local-agent-index" "$HOME/.local/bin/"
 echo "installed CLI helpers into ~/.local/bin"
@@ -28,10 +43,12 @@ B="$HOME/.config/hypr/bindings.lua"
 BIND="o.bind(\"SUPER + CTRL + SHIFT + L\", \"Omarchy help\", \"omarchy-shell shell summon $MARK '{}'\")"
 if [[ -f $B ]] && grep -q "$MARK" "$B"; then
   # Replace whatever the marked line currently runs (older versions used toggle or --popup).
+  cp "$B" "$B.bak.$(date +%s)"
   sed -i "/$MARK/s|^o\.bind(.*|$BIND|" "$B"
   echo "updated keybinding in $B"
 else
   mkdir -p "$(dirname "$B")"
+  [[ -f $B ]] && cp "$B" "$B.bak.$(date +%s)"
   printf '\n-- Omarchy Help (%s): summon the help window.\n%s\n' "$MARK" "$BIND" >> "$B"
   echo "added keybinding to $B"
 fi
@@ -41,10 +58,11 @@ if [[ -f $LF ]] && grep -q "$MARK) window" "$LF"; then
   echo "window rule already in $LF"
 else
   mkdir -p "$(dirname "$LF")"
+  [[ -f $LF ]] && cp "$LF" "$LF.bak.$(date +%s)"
   cat >> "$LF" <<RULE
 
 -- Omarchy Help ($MARK) window: float it (it tiles without this).
-o.window({ class = "^org.quickshell$", title = "^Omarchy Help$" }, { float = true, center = true, size = { 760, 580 } })
+o.window({ class = "^org.quickshell$", title = "^Omarchy Help$" }, { float = true, center = true, size = { 760, 580 }, opacity = "1 1" })
 RULE
   echo "added window rule to $LF"
 fi

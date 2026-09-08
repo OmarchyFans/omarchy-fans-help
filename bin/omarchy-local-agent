@@ -1091,7 +1091,9 @@ def touches(cmd):
     return dedupe(reads), dedupe(writes)
 
 
-STEP_INLINE = re.compile(r"`([^`]*\bomarchy(?:-[a-z-]+)?\b[^`]*)`")
+# An inline span counts only when it starts with the command: a path such as
+# ~/.config/omarchy/backgrounds also contains the word, and is not a step.
+STEP_INLINE = re.compile(r"`(?:\$ ?)?(omarchy(?:-[a-z-]+)?(?:\s[^`]*)?)`")
 
 
 def extract_steps(text):
@@ -1113,9 +1115,11 @@ def extract_steps(text):
             if l and not l.startswith("#"):
                 add(l)
             continue
-        m = STEP_INLINE.search(l)
-        if m:
-            add(m.group(1)); continue
+        spans = STEP_INLINE.findall(l)
+        if spans:
+            for c in spans:
+                add(c)
+            continue
         if re.match(r"^\$\s+\S", l) or re.match(r"^omarchy(-[a-z-]+)?\s", l):
             add(l)
     return out[:8]

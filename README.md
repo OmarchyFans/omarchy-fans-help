@@ -1,5 +1,7 @@
 # Omarchy Help
 
+![Omarchy Help window](preview.png)
+
 Offline help for [Omarchy](https://omarchy.org), in a window that stays open
 while you act on what it found. Plugin id `io.github.modpunk.omarchy-help`.
 
@@ -19,16 +21,56 @@ while you act on what it found. Plugin id `io.github.modpunk.omarchy-help`.
 
 ```sh
 omarchy plugin add https://github.com/modpunk/omarchy-help
-~/.config/omarchy/plugins/io.github.modpunk.omarchy-help/install.sh   # CLI helpers, keybinding, float rule
-omarchy-local-agent-index                                              # build the search index
+omarchy plugin enable io.github.modpunk.omarchy-help
+~/.config/omarchy/plugins/io.github.modpunk.omarchy-help/install.sh   # asks first; CLI helpers, keybinding, float rule
+omarchy-local-agent-index                                              # build the search index (fetches the manual for your version)
 omarchy bar add io.github.modpunk.omarchy-help                         # optional bar button
 ```
 
-`install.sh` copies `bin/omarchy-local-agent` and `bin/omarchy-local-agent-index`
-into `~/.local/bin`, binds SUPER + CTRL + SHIFT + L to summon the window, and
-adds a Hyprland rule that floats it. The chat and explain features need the
-local model from the `omarchy-local-agent` service; search, run, and open work
-without it.
+`install.sh` shows what it will change and asks before touching anything
+(`--yes` skips the prompt). It copies the two CLI helpers into `~/.local/bin`,
+appends a marked SUPER + CTRL + SHIFT + L keybinding to `bindings.lua` and a
+marked float rule to `looknfeel.lua` (backups kept beside them), installs the
+post-update hook that rebuilds the index, and adds the llama-server user unit
+and a config file only when none exist. Nothing else in your configuration is
+modified.
+
+### Dependencies
+
+Search, run, and open need only what Omarchy ships: `python3`, `sqlite3`,
+`nvim`, `wl-copy`, `omarchy-launch-tui`. Explain and chat additionally need:
+
+- `llama-cpp` (Omarchy: `omarchy pkg add llama-cpp ggml-cpu ggml-cuda`, or the
+  CPU build; the unit offloads to the GPU when one is present)
+- a GGUF model in `~/.local/share/omarchy-local-agent/models/`. The default is
+  Qwen3.8-4B-Distill Q4_K_M (2.6 GB, from
+  [empero-ai/Qwen3.8-4B-Distill-GGUF](https://huggingface.co/empero-ai/Qwen3.8-4B-Distill-GGUF)):
+
+  ```sh
+  mkdir -p ~/.local/share/omarchy-local-agent/models && cd "$_"
+  curl -fL --continue-at - -o Qwen3.8-4B-Distill-Q4_K_M.gguf \
+    https://huggingface.co/empero-ai/Qwen3.8-4B-Distill-GGUF/resolve/main/Qwen3.8-4B-Q4_K_M.gguf
+  systemctl --user enable --now omarchy-local-agent
+  ```
+
+  `tools/fetch-models.sh` fetches the whole bake-off set (22 GB) if you want to
+  rerun `tools/bench.sh`. Downloads are plain files; nothing is executed.
+
+The model runs on `127.0.0.1:8080` only and the unit is hardened
+(`ProtectSystem=strict`, home read-only except its own data directory). No
+network is used at query time; the indexer fetches the manual once from the
+official Omarchy repository at your installed version's tag.
+
+## Removal
+
+```sh
+~/.config/omarchy/plugins/io.github.modpunk.omarchy-help/uninstall.sh   # keybinding, rule, helpers, hook
+omarchy plugin remove io.github.modpunk.omarchy-help
+```
+
+`uninstall.sh` removes only the marked lines and files it added and prints the
+commands for the pieces it leaves alone (the service unit, the index and
+models, the config file), so nothing large disappears without you asking.
 
 ## What can run from the panel
 
@@ -103,6 +145,8 @@ uses. `--check CMD` prints the execution-policy verdict. Configuration lives in 
 | `bin/omarchy-local-agent-index` | builds the index; keeps the bind-count and corpus-collapse guards |
 | `tools/eval.py` | retrieval regression harness: run after any change to retrieval, ranking, stopwords, weights or the outline; report the held-out number, never tune against it |
 | `tools/bench.sh`, `tools/bench-results.txt` | the model bake-off (Qwen3.8-4B-Distill won) |
+| `tools/fetch-models.sh` | downloads the bake-off models from Hugging Face (plain files) |
+| `install.sh`, `uninstall.sh` | the pieces a plugin cannot ship; both marker-based, install asks first |
 | `docs/local-agent.md` | the CLI's own design notes |
 | `systemd/omarchy-local-agent.service` | llama-server user unit (GPU offload, hardened) |
 | `hooks/refresh-agent-index` | post-update hook that rebuilds the index |

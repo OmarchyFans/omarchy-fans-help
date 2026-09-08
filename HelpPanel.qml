@@ -45,6 +45,10 @@ Item {
   property int streamIndex: -1
 
   property color background: Color.menu.background
+  // Solid backdrop for screenshots (the menu surface is translucent by theme);
+  // toggled over IPC: omarchy-shell shell call <id> setSolid 1|0
+  property bool solid: false
+  function setSolid(flag) { solid = String(flag) === "1" || flag === true }
   property color foreground: Color.menu.text
   property color border: Color.menu.border
   property color selectedBackground: Color.menu.selectedBackground
@@ -332,7 +336,7 @@ Item {
     id: window
     visible: false                       // keepLoaded mounts us at shell start
     title: "Omarchy Help"
-    color: root.background
+    color: root.solid ? Qt.rgba(root.background.r, root.background.g, root.background.b, 1) : root.background
     implicitWidth: 760
     implicitHeight: 580
     minimumSize: Qt.size(480, 320)
