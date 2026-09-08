@@ -1112,6 +1112,11 @@ def extract_steps(text):
     return out[:8]
 
 
+FILL_SYSTEM = ("You fill in command-line templates for an Omarchy Linux user. Use only "
+               "values stated in the conversation. Reply with the finished command on "
+               "one line and nothing else, or the single word UNKNOWN.")
+
+
 def fill_placeholders(cfg, system, transcript, cmd):
     """The user chose "ask the model to fill in arguments": one greedy call
     that must return the finished command or UNKNOWN. The result is shown
@@ -1122,8 +1127,12 @@ def fill_placeholders(cfg, system, transcript, cmd):
             "Replace every <placeholder> with the concrete value the conversation "
             "implies. Reply with the finished command on one line and nothing else. "
             "If a value is not stated in the conversation, reply UNKNOWN.")
+    # The main system prompt tells the model to answer only from the manual,
+    # which makes it say UNKNOWN here even when the conversation names the
+    # value; a short dedicated prompt fills correctly and still refuses when
+    # nothing is stated.
     try:
-        raw = chat(cfg, system, user, max_tokens=80, temperature=0.0)
+        raw = chat(cfg, FILL_SYSTEM, user, max_tokens=80, temperature=0.0)
     except ServerDown:
         return None
     line = raw.strip().splitlines()[0].strip().strip("`") if raw.strip() else ""
