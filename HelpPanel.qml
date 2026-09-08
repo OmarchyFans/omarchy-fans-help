@@ -98,7 +98,7 @@ Item {
                      secondary: "", sid: "" })
     results.append({ kind: "hint", primary: "Examples:  nightlight  ·  screenshot  ·  how do I change my theme",
                      secondary: "", sid: "" })
-    results.append({ kind: "hint", primary: "Enter runs a command, explains a section, or starts a chat.  Shift+Enter adds a line.",
+    results.append({ kind: "hint", primary: "Enter runs a command, opens the manual, or starts a chat.  Shift+Enter adds a line.",
                      secondary: "", sid: "" })
     syncSelected()
   }
@@ -153,23 +153,23 @@ Item {
   // ---- actions ------------------------------------------------------------
 
   function primaryLabel(kind) {
-    return kind === "command" ? "Run" : kind === "section" ? "Explain" : kind === "ask" ? "Chat" : kind === "bind" ? "Copy" : ""
+    return kind === "command" ? "Run" : kind === "section" ? "Open manual" : kind === "ask" ? "Chat" : kind === "bind" ? "Copy" : ""
   }
   function secondaryLabel(kind) {
-    return kind === "command" ? "Copy" : kind === "section" ? "Open manual" : ""
+    return kind === "command" ? "Copy" : kind === "section" ? "Explain" : ""
   }
 
   function primary(r) {
     if (!r) return
     if (r.kind === "command") runCommand(r.primary)
-    else if (r.kind === "section") startChat(filterText || ("Explain " + r.primary), r.sid, r.primary)
+    else if (r.kind === "section") openSection(r.sid)
     else if (r.kind === "ask") startChat(filterText, "", "")
     else if (r.kind === "bind") copy(r.primary)
   }
   function secondary(r) {
     if (!r) return
     if (r.kind === "command") copy(r.primary)
-    else if (r.kind === "section") openSection(r.sid)
+    else if (r.kind === "section") startChat(filterText || ("Explain " + r.primary), r.sid, r.primary)
     else if (r.kind === "bind") copy(r.primary)
   }
 
@@ -510,6 +510,7 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: Style.space(4)
                 visible: row.current
+                width: visible ? implicitWidth : 0      // a hidden Row still reserves its width
                 Button {
                   visible: text !== ""
                   text: root.primaryLabel(row.model.kind)

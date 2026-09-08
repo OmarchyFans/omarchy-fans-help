@@ -969,14 +969,17 @@ def open_section(sid, print_only=False):
     return 0
 
 
-RUN_SCRIPT = ('read -e -i "$OH_CMD" -p "$ " line && eval "$line"; '
-              'echo; read -rp "Press Enter to close "')
+# A command with no <placeholder> runs at once; one with placeholders is put
+# on an editable prompt so they can be filled in before Enter.
+RUN_SCRIPT = ('if [[ $OH_CMD == *"<"* ]]; then read -e -i "$OH_CMD" -p "$ " line; '
+              'else line=$OH_CMD; printf "$ %s\\n" "$line"; fi; '
+              'eval "$line"; echo; read -rp "Press Enter to close "')
 
 
 def run_command(cmd, print_only=False):
-    """Open a floating terminal with the command pre-filled on an editable
-    prompt: Enter runs it, the user can fix placeholders first. The command
-    travels in the environment, never through a shell string."""
+    """Open a floating terminal that runs the command, or, when it still has
+    <placeholders>, shows it on an editable prompt first. The command travels
+    in the environment, never through a shell string."""
     argv = ["omarchy-launch-tui", "--app-id=TUI.float",
             "env", f"OH_CMD={cmd}", "bash", "-c", RUN_SCRIPT]
     if print_only:
