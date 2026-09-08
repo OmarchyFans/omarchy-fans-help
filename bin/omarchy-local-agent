@@ -986,7 +986,7 @@ def open_section(sid, print_only=False):
 
 REFUSE = [
     (r"(^|[\s;&|(`$])(sudo|pkexec|doas|su)(\s|$)", "privilege escalation is never run from the help panel"),
-    (r"(^|[\s;&|(`$/])rm(\s+-[A-Za-z]+|\s+--[a-z-]+)*\s+(-[A-Za-z]*[rR]|--recursive)(\s|$)",
+    (r"(^|[\s;&|(`$/])rm(\s+-[A-Za-z]+|\s+--[a-z-]+)*\s+(-[A-Za-z]*[rR][A-Za-z]*|--recursive)(\s|$)",
      "recursive rm is never run from the help panel"),
     (r"-exec(dir)?\s+(/[\w/]*/)?(rm|shred|dd|mkfs|chmod|chown)(\s|$)",
      "find -exec with a destructive command is never run from the help panel"),
