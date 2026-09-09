@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <code>omarchy plugin add https://github.com/modpunk/omarchy-help</code>
+  <code>omarchy plugin add https://github.com/OmarchyFans/omarchy-fans-help</code>
 </p>
 
 ---
@@ -111,7 +111,7 @@ instantly, light themes included.
 ## Install
 
 ```sh
-omarchy plugin add https://github.com/modpunk/omarchy-help
+omarchy plugin add https://github.com/OmarchyFans/omarchy-fans-help
 omarchy plugin enable io.github.modpunk.omarchy-help
 ~/.config/omarchy/plugins/io.github.modpunk.omarchy-help/install.sh   # asks first; CLI helpers, keybinding, float rule
 omarchy-local-agent-index                                              # build the search index (fetches the manual for your version)
@@ -232,4 +232,4 @@ not point the indexer at master.
 
 ## License
 
-MIT. Made for [omarchy.fans](https://omarchy.fans).
+MIT. An [omarchy.fans](https://omarchy.fans) project ([OmarchyFans](https://github.com/OmarchyFans) on GitHub); modpunk is the main contributor.

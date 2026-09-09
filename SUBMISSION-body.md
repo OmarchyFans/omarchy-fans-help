@@ -1,6 +1,6 @@
 ### Repository URL
 
-https://github.com/modpunk/omarchy-help
+https://github.com/OmarchyFans/omarchy-fans-help
 
 ### Category
 
