@@ -135,17 +135,20 @@ Search, run, and open need only what Omarchy ships: `python3`, `sqlite3`,
   CPU build; the unit offloads to the GPU when one is present)
 - a GGUF model in `~/.local/share/omarchy-local-agent/models/`. The default is
   Qwen3.8-4B-Distill Q4_K_M (2.6 GB, from
-  [empero-ai/Qwen3.8-4B-Distill-GGUF](https://huggingface.co/empero-ai/Qwen3.8-4B-Distill-GGUF)):
+  [empero-ai/Qwen3.8-4B-Distill-GGUF](https://huggingface.co/empero-ai/Qwen3.8-4B-Distill-GGUF)).
+  `tools/fetch-models.sh` downloads it pinned to an immutable repository
+  revision and refuses to install it unless the file's SHA-256 matches the
+  digest committed in the script (partials are discarded on mismatch, with
+  connection, time and size limits):
 
   ```sh
-  mkdir -p ~/.local/share/omarchy-local-agent/models && cd "$_"
-  curl -fL --continue-at - -o Qwen3.8-4B-Distill-Q4_K_M.gguf \
-    https://huggingface.co/empero-ai/Qwen3.8-4B-Distill-GGUF/resolve/main/Qwen3.8-4B-Q4_K_M.gguf
+  ~/.config/omarchy/plugins/io.github.modpunk.omarchy-help/tools/fetch-models.sh          # default model, verified
+  ~/.config/omarchy/plugins/io.github.modpunk.omarchy-help/tools/fetch-models.sh --verify # re-check what is on disk
   systemctl --user enable --now omarchy-local-agent
   ```
 
-  `tools/fetch-models.sh` fetches the whole bake-off set (22 GB) if you want to
-  rerun `tools/bench.sh`. Downloads are plain files; nothing is executed.
+  `--all` fetches the whole bake-off set (about 27 GB) for `tools/bench.sh`.
+  Downloads are plain data files; nothing downloaded is executed.
 
 The model runs on `127.0.0.1:8080` only and the unit is hardened
 (`ProtectSystem=strict`, home read-only except its own data directory). No
@@ -211,7 +214,7 @@ static prefix. Retrieval is guarded by a regression harness (`tools/eval.py`,
 | `bin/omarchy-local-agent-index` | builds the index; keeps the bind-count and corpus-collapse guards |
 | `tools/eval.py` | retrieval regression harness: run after any change to retrieval, ranking, stopwords, weights or the outline; report the held-out number, never tune against it |
 | `tools/bench.sh`, `tools/bench-results.txt` | the model bake-off (Qwen3.8-4B-Distill won) |
-| `tools/fetch-models.sh` | downloads the bake-off models from Hugging Face (plain files) |
+| `tools/fetch-models.sh` | downloads models pinned to immutable Hugging Face revisions and verifies their SHA-256 before installing |
 | `docs/local-agent.md` | the CLI's own design notes |
 | `systemd/omarchy-local-agent.service` | llama-server user unit (GPU offload, hardened) |
 | `hooks/refresh-agent-index` | post-update hook that rebuilds the index |
