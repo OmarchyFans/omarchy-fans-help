@@ -26,7 +26,7 @@ gemma-e2b-iq2  unsloth/gemma-4-E2B-it-GGUF            0314792d7f1f7e229411f62075
 gemma-e2b-qat  google/gemma-4-E2B-it-qat-q4_0-gguf    675cff42a74c774d6cb76f76d8eacb49b48c9b93 gemma-4-E2B_q4_0-it.gguf             gemma-4-E2B-it-qat-q4_0.gguf    fa401b55b07ee70a54c6dae3903c783a6e65064312529ea57175cb5f8dec6634 3349516256
 qwen3.8-27b    unsloth/Qwen3.8-27B-GGUF               4ca720788d1e01f1bff70c033e0d0028fd02e502 Qwen3.8-27B-UD-IQ4_XS.gguf           Qwen3.8-27B-UD-IQ4_XS.gguf      40fac4050e940397dbf13087afd50f4734a11805bf9d65ef8ddd7483470e6199 14252845984
 '
-DEFAULT=qwen3.5-4b
+DEFAULT=qwen3.8-4b
 
 digest_of() { sha256sum "$1" | cut -d' ' -f1; }
 

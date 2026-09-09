@@ -134,9 +134,8 @@ Search, run, and open need only what Omarchy ships: `python3`, `sqlite3`,
 - `llama-cpp` (Omarchy: `omarchy pkg add llama-cpp ggml-cpu ggml-cuda`, or the
   CPU build; the unit offloads to the GPU when one is present)
 - a GGUF model in `~/.local/share/omarchy-local-agent/models/`. The default is
-  Qwen3.5-4B Q4_K_M (2.6 GB, from
-  [unsloth/Qwen3.5-4B-GGUF](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF)), which
-  won the GPU bake-off on navigation accuracy.
+  Qwen3.8-4B-Distill Q4_K_M (2.6 GB, from
+  [empero-ai/Qwen3.8-4B-Distill-GGUF](https://huggingface.co/empero-ai/Qwen3.8-4B-Distill-GGUF)).
   `tools/fetch-models.sh` downloads it pinned to an immutable repository
   revision and refuses to install it unless the file's SHA-256 matches the
   digest committed in the script (partials are discarded on mismatch, with
@@ -205,10 +204,13 @@ only has to emit an integer), names one section, gets that section verbatim, and
 answers from it. The first call is nearly free because llama.cpp caches the
 static prefix. Retrieval is guarded by a regression harness (`tools/eval.py`,
 24/27 held-out cases). The model is chosen by navigation accuracy on the
-held-out questions (`tools/nav-eval.py`), not by speed: on the GPU bake-off
-the fastest model (Gemma 4 E2B, 2.2x the prefill) was also the least accurate
-(22/30 against Qwen3.5-4B's 28/30), and at under half a second per query the
-throughput gap is invisible while the accuracy gap is not.
+held-out questions (`tools/nav-eval.py`) when the difference is significant
+(`tools/headtohead.py`, exact McNemar); when it is not, general capability
+breaks the tie, and throughput only after that. On the GPU bake-off the
+fastest model (Gemma 4 E2B, 2.2x the prefill) was also the least accurate
+(22/30 against 26-28/30 for the Qwen 4B models), while the two Qwen models
+tied (p = 0.50), so the stronger general model, Qwen3.8-4B-Distill, is the
+default.
 
 ## Repository layout
 
@@ -219,7 +221,7 @@ throughput gap is invisible while the accuracy gap is not.
 | `bin/omarchy-local-agent-index` | builds the index; keeps the bind-count and corpus-collapse guards |
 | `tools/eval.py` | retrieval regression harness: run after any change to retrieval, ranking, stopwords, weights or the outline; report the held-out number, never tune against it |
 | `tools/bench.sh`, `tools/bench-gpu.sh`, `tools/bench-results*.txt` | throughput bake-offs (CPU and GPU) across the candidate models |
-| `tools/nav-eval.py` | navigation accuracy per model over the 30 held-out questions; this number picks the default, throughput only breaks ties |
+| `tools/nav-eval.py`, `tools/headtohead.py` | navigation accuracy per model over the 30 held-out questions, and a per-item head-to-head with an exact McNemar test so a difference can be called significant rather than eyeballed |
 | `tools/fetch-models.sh` | downloads models pinned to immutable Hugging Face revisions and verifies their SHA-256 before installing |
 | `docs/local-agent.md` | the CLI's own design notes |
 | `systemd/omarchy-local-agent.service` | llama-server user unit (GPU offload, hardened) |
