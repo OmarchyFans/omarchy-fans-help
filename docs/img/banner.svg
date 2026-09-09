@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-label="Omarchy Help">
+<defs>
+<linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1e1e2e"/><stop offset="1" stop-color="#171723"/></linearGradient>
+</defs>
+<rect width="1200" height="300" rx="18" fill="url(#g)"/>
+<rect x="1" y="1" width="1198" height="298" rx="17" fill="none" stroke="#89b4fa" stroke-opacity="0.35" stroke-width="2"/>
+<rect x="60" y="56" width="620" height="56" rx="8" fill="#171723" stroke="#89b4fa" stroke-width="2"/>
+<text x="80" y="93" font-family="JetBrainsMono Nerd Font, JetBrains Mono, Fira Code, monospace" font-size="26" fill="#cdd6f4" textLength="372" lengthAdjust="spacingAndGlyphs">how do I change my theme?</text>
+<rect x="466" y="66" width="2" height="36" fill="#89b4fa"><animate attributeName="opacity" values="1;0;1" dur="1.2s" repeatCount="indefinite"/></rect>
+<text x="76" y="144" font-family="monospace" font-size="18" fill="#9aa1b7">⌨</text>
+<text x="108" y="144" font-family="JetBrainsMono Nerd Font, JetBrains Mono, monospace" font-size="19" fill="#cdd6f4">SUPER + CTRL + SHIFT + L</text>
+<text x="676" y="144" text-anchor="end" font-family="JetBrainsMono Nerd Font, JetBrains Mono, monospace" font-size="15" fill="#9aa1b7">Omarchy help</text>
+<rect x="60" y="162" width="620" height="40" rx="6" fill="#89b4fa" fill-opacity="0.16"/>
+<text x="76" y="188" font-family="monospace" font-size="18" fill="#9aa1b7">❯</text>
+<text x="108" y="188" font-family="JetBrainsMono Nerd Font, JetBrains Mono, monospace" font-size="19" fill="#cdd6f4">omarchy theme set &lt;name&gt;</text>
+<text x="676" y="188" text-anchor="end" font-family="JetBrainsMono Nerd Font, JetBrains Mono, monospace" font-size="15" fill="#89b4fa">Run · Copy</text>
+<text x="76" y="232" font-family="monospace" font-size="18" fill="#9aa1b7">▤</text>
+<text x="108" y="232" font-family="JetBrainsMono Nerd Font, JetBrains Mono, monospace" font-size="19" fill="#cdd6f4">Themes</text>
+<text x="676" y="232" text-anchor="end" font-family="JetBrainsMono Nerd Font, JetBrains Mono, monospace" font-size="15" fill="#9aa1b7">Open manual · Explain</text>
+<text x="740" y="104" font-family="JetBrainsMono Nerd Font, JetBrains Mono, monospace" font-size="54" font-weight="700" fill="#cdd6f4">Omarchy Help</text>
+<text x="742" y="140" font-family="JetBrainsMono Nerd Font, JetBrains Mono, monospace" font-size="17" fill="#9aa1b7" textLength="430" lengthAdjust="spacingAndGlyphs">offline help that acts, not just answers</text>
+<rect x="742" y="172" width="146" height="30" rx="15" fill="#f38ba8" fill-opacity="0.16" stroke="#f38ba8" stroke-width="1.5"/>
+<text x="755" y="193" font-family="JetBrainsMono Nerd Font, JetBrains Mono, monospace" font-size="15" fill="#f38ba8" textLength="120" lengthAdjust="spacingAndGlyphs">sudo? refused</text>
+<rect x="898" y="172" width="210" height="30" rx="15" fill="#f9e2af" fill-opacity="0.16" stroke="#f9e2af" stroke-width="1.5"/>
+<text x="911" y="193" font-family="JetBrainsMono Nerd Font, JetBrains Mono, monospace" font-size="15" fill="#f9e2af" textLength="184" lengthAdjust="spacingAndGlyphs">one click = one step</text>
+<rect x="742" y="212" width="136" height="30" rx="15" fill="#a6e3a1" fill-opacity="0.16" stroke="#a6e3a1" stroke-width="1.5"/>
+<text x="755" y="233" font-family="JetBrainsMono Nerd Font, JetBrains Mono, monospace" font-size="15" fill="#a6e3a1" textLength="110" lengthAdjust="spacingAndGlyphs">runs offline</text>
+<rect x="888" y="212" width="192" height="30" rx="15" fill="#94e2d5" fill-opacity="0.16" stroke="#94e2d5" stroke-width="1.5"/>
+<text x="901" y="233" font-family="JetBrainsMono Nerd Font, JetBrains Mono, monospace" font-size="15" fill="#94e2d5" textLength="166" lengthAdjust="spacingAndGlyphs">follows your theme</text>
+<rect x="742" y="252" width="173" height="30" rx="15" fill="#cba6f7" fill-opacity="0.16" stroke="#cba6f7" stroke-width="1.5"/>
+<text x="755" y="273" font-family="JetBrainsMono Nerd Font, JetBrains Mono, monospace" font-size="15" fill="#cba6f7" textLength="147" lengthAdjust="spacingAndGlyphs">reads the manual</text>
+</svg>
