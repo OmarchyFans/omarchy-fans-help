@@ -157,7 +157,9 @@ Item {
   // ---- actions ------------------------------------------------------------
 
   function primaryLabel(kind) {
-    return kind === "command" ? "Run" : kind === "section" ? "Open manual" : kind === "ask" ? "Chat" : kind === "bind" ? "Copy" : ""
+    // "Do it." here too: the search row and the chat step are the same act,
+    // so they should not be labelled differently.
+    return kind === "command" ? "Do it." : kind === "section" ? "Open manual" : kind === "ask" ? "Chat" : kind === "bind" ? "Copy" : ""
   }
   function secondaryLabel(kind) {
     return kind === "command" ? "Copy" : kind === "section" ? "Explain" : ""
@@ -622,12 +624,79 @@ Item {
                     readonly property bool blocked: modelData.verdict === "refuse"
                     width: parent.width
                     spacing: Style.space(1)
-                    Button {
-                      text: (step.blocked ? "Blocked:  " : "Run:  ") + (step.cmd.length > 90 ? step.cmd.slice(0, 90) + "…" : step.cmd)
-                      bordered: true; fontSize: Style.font.caption; leftAlign: true
-                      foreground: step.blocked ? root.dim : root.foreground; fontFamily: root.fontFamily
-                      enabled: !step.blocked
-                      onClicked: root.runCommand(step.cmd)
+
+                    // "Do it." — the step button, with a short charge-up before
+                    // the command fires. The delay is not decoration alone: it
+                    // is the last moment to see what is about to run, and it
+                    // makes a click feel deliberate rather than incidental.
+                    // Blocked steps never animate and never fire.
+                    property bool charging: false
+
+                    Item {
+                      width: parent.width
+                      height: doBtn.implicitHeight
+
+                      Button {
+                        id: doBtn
+                        anchors.fill: parent
+                        text: (step.blocked ? "Blocked:  " : "Do it.   ")
+                              + (step.cmd.length > 88 ? step.cmd.slice(0, 88) + "…" : step.cmd)
+                        bordered: true; fontSize: Style.font.caption; leftAlign: true
+                        foreground: step.blocked ? root.dim
+                                    : step.charging ? root.accent : root.foreground
+                        fontFamily: root.fontFamily
+                        enabled: !step.blocked && !step.charging
+                        onClicked: charge.start()
+                      }
+
+                      // Force lightning: thin arcs raked across the button,
+                      // struck in sequence rather than all at once.
+                      Item {
+                        anchors.fill: parent
+                        visible: step.charging
+                        clip: true
+                        Repeater {
+                          model: 7
+                          delegate: Rectangle {
+                            required property int index
+                            width: Math.max(1, Style.space(1))
+                            height: parent.height * 2.4
+                            y: -parent.height * 0.7
+                            x: parent.width * (0.08 + 0.13 * index)
+                            rotation: index % 2 ? 18 : -18
+                            color: root.accent
+                            opacity: 0
+                            SequentialAnimation on opacity {
+                              running: step.charging
+                              PauseAnimation { duration: 40 * index }
+                              NumberAnimation { to: 0.85; duration: 60 }
+                              NumberAnimation { to: 0; duration: 150 }
+                            }
+                          }
+                        }
+                      }
+
+                      // A wash of accent that swells and releases as it fires.
+                      Rectangle {
+                        id: wash
+                        anchors.fill: parent
+                        radius: Style.space(4)
+                        color: root.accent
+                        opacity: 0
+                      }
+                    }
+
+                    SequentialAnimation {
+                      id: charge
+                      ScriptAction { script: step.charging = true }
+                      NumberAnimation { target: wash; property: "opacity"; to: 0.22; duration: 320 }
+                      NumberAnimation { target: wash; property: "opacity"; to: 0; duration: 260 }
+                      ScriptAction {
+                        script: {
+                          step.charging = false
+                          root.runCommand(step.cmd)
+                        }
+                      }
                     }
                     Text {
                       width: parent.width
