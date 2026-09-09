@@ -1,0 +1,109 @@
+omarchy-local-agent model bake-off
+date:    2026-09-08T19:13:53-05:00
+cpu:     11th Gen Intel(R) Core(TM) i9-11900H @ 2.50GHz
+threads: 8
+ram:     31Gi total, 23Gi available
+
+=== gemma-4-E2B-it-qat-q4_0.gguf (3.2G)
+warning: asserts enabled, performance may be affected
+  Device 0: NVIDIA GeForce RTX 3050 Ti Laptop GPU, compute capability 8.6, VMM: yes, VRAM: 3770 MiB
+| model                          |       size |     params | backend    | ngl |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | --------------: | -------------------: |
+| gemma4 E2B Q4_0                |   3.10 GiB |     4.63 B | CUDA       |  99 |           pp512 |      2699.17 ± 38.68 |
+| gemma4 E2B Q4_0                |   3.10 GiB |     4.63 B | CUDA       |  99 |           tg128 |         75.33 ± 0.45 |
+
+
+=== gemma-4-E2B-it-UD-IQ2_M.gguf (2.2G)
+warning: asserts enabled, performance may be affected
+  Device 0: NVIDIA GeForce RTX 3050 Ti Laptop GPU, compute capability 8.6, VMM: yes, VRAM: 3770 MiB
+| model                          |       size |     params | backend    | ngl |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | --------------: | -------------------: |
+| gemma4 E2B IQ2_M - 2.7 bpw     |   2.12 GiB |     4.65 B | CUDA       |  99 |           pp512 |      2508.89 ± 35.89 |
+| gemma4 E2B IQ2_M - 2.7 bpw     |   2.12 GiB |     4.65 B | CUDA       |  99 |           tg128 |         63.98 ± 0.26 |
+
+
+=== Nemotron-3-Nano-4B-Q4_K_M.gguf (2.7G)
+warning: asserts enabled, performance may be affected
+  Device 0: NVIDIA GeForce RTX 3050 Ti Laptop GPU, compute capability 8.6, VMM: yes, VRAM: 3770 MiB
+| model                          |       size |     params | backend    | ngl |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | --------------: | -------------------: |
+| nemotron_h ?B Q4_K - Medium    |   2.63 GiB |     3.97 B | CUDA       |  99 |           pp512 |       1587.29 ± 8.47 |
+| nemotron_h ?B Q4_K - Medium    |   2.63 GiB |     3.97 B | CUDA       |  99 |           tg128 |         47.11 ± 0.12 |
+
+
+=== Qwen3.5-4B-Q4_K_M.gguf (2.6G)
+warning: asserts enabled, performance may be affected
+  Device 0: NVIDIA GeForce RTX 3050 Ti Laptop GPU, compute capability 8.6, VMM: yes, VRAM: 3770 MiB
+| model                          |       size |     params | backend    | ngl |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | --------------: | -------------------: |
+| qwen35 4B Q4_K - Medium        |   2.54 GiB |     4.21 B | CUDA       |  99 |           pp512 |      1233.09 ± 28.36 |
+| qwen35 4B Q4_K - Medium        |   2.54 GiB |     4.21 B | CUDA       |  99 |           tg128 |         40.44 ± 0.13 |
+
+
+=== Qwen3.8-27B-UD-IQ4_XS.gguf (14G)
+warning: asserts enabled, performance may be affected
+  Device 0: NVIDIA GeForce RTX 3050 Ti Laptop GPU, compute capability 8.6, VMM: yes, VRAM: 3770 MiB
+| model                          |       size |     params | backend    | ngl |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | --------------: | -------------------: |
+  FAILED to benchmark Qwen3.8-27B-UD-IQ4_XS.gguf
+
+=== Qwen3.8-4B-Distill-Q4_K_M.gguf (2.6G)
+warning: asserts enabled, performance may be affected
+  Device 0: NVIDIA GeForce RTX 3050 Ti Laptop GPU, compute capability 8.6, VMM: yes, VRAM: 3770 MiB
+| model                          |       size |     params | backend    | ngl |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | --------------: | -------------------: |
+| qwen35 4B Q4_K - Medium        |   2.58 GiB |     4.33 B | CUDA       |  99 |           pp512 |      1234.25 ± 26.75 |
+| qwen35 4B Q4_K - Medium        |   2.58 GiB |     4.33 B | CUDA       |  99 |           tg128 |        30.52 ± 13.83 |
+
+
+=== prose smoke: gemma-4-E2B-it-qat-q4_0.gguf
+  [1.996s] how do I record my screen
+    nav=skill-capture#2 raw='250'
+  [0.325s] how do I stop my laptop going to sleep
+    nav=36-system-sleep#0 raw='193'
+  [0.304s] how does the clipboard history work
+    nav=08-unified-clipboard-history#0 raw='45'
+
+=== prose smoke: gemma-4-E2B-it-UD-IQ2_M.gguf
+  [2.142s] how do I record my screen
+    nav=12-screenshots-recording#0 raw='49'
+  [0.353s] how do I stop my laptop going to sleep
+    nav=36-system-sleep#0 raw='193'
+  [0.330s] how does the clipboard history work
+    nav=08-unified-clipboard-history#0 raw='45'
+
+=== prose smoke: Nemotron-3-Nano-4B-Q4_K_M.gguf
+  [3.230s] how do I record my screen
+    nav=skill-capture#2 raw='250'
+  [0.528s] how do I stop my laptop going to sleep
+    nav=13-toggles-idle-screensaver#5 raw='60'
+  [0.502s] how does the clipboard history work
+    nav=08-unified-clipboard-history#0 raw='45'
+
+=== prose smoke: Qwen3.5-4B-Q4_K_M.gguf
+  [4.071s] how do I record my screen
+    nav=12-screenshots-recording#1 raw='50'
+  [0.549s] how do I stop my laptop going to sleep
+    nav=13-toggles-idle-screensaver#5 raw='60'
+  [0.511s] how does the clipboard history work
+    nav=08-unified-clipboard-history#0 raw='45'
+
+=== prose smoke: Qwen3.8-27B-UD-IQ4_XS.gguf
+  server never came up -- skipped
+=== prose smoke: Qwen3.8-4B-Distill-Q4_K_M.gguf
+  [3.951s] how do I record my screen
+    nav=skill-capture#2 raw='250'
+  [0.570s] how do I stop my laptop going to sleep
+    nav=13-toggles-idle-screensaver#5 raw='60'
+  [0.553s] how does the clipboard history work
+    nav=08-unified-clipboard-history#0 raw='45'
+
+
+--- reading this ---
+Take pp (t/s) from the winning model and set the injection budget:
+
+    max_inject_chars ~= target_ttft_seconds * pp_tokens_per_sec * 4
+
+e.g. a 3s target at 150 t/s prefill -> ~1800 tokens -> ~7200 chars.
+Then edit ~/.config/omarchy-local-agent/config.json and re-run:
+    python3 ~/.local/share/omarchy-local-agent/eval.py

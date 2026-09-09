@@ -4,9 +4,10 @@ Documentation=https://github.com/ggml-org/llama.cpp
 
 [Service]
 Type=simple
-# Qwen3.8-4B-Distill won the bake-off: fastest prefill and 3/3 correct manual
-# navigation. See bench-results.txt.
-Environment=MODEL=%h/.local/share/omarchy-local-agent/models/Qwen3.8-4B-Distill-Q4_K_M.gguf
+# Qwen3.5-4B won the GPU bake-off on navigation accuracy (28/30 held-out
+# questions land in the right chapter; see tools/nav-eval.py and
+# tools/bench-results-gpu.txt). Throughput only decides ties.
+Environment=MODEL=%h/.local/share/omarchy-local-agent/models/Qwen3.5-4B-Q4_K_M.gguf
 
 # --ctx-size is set explicitly and small on purpose: these models advertise very
 #   large contexts and would otherwise allocate KV cache this workload never
