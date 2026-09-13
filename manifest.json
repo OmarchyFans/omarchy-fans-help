@@ -5,7 +5,7 @@
   "version": "0.3.0",
   "author": "modpunk",
   "license": "MIT",
-  "description": "Help for Omarchy that acts, not just answers. Type to search your live keybindings, the omarchy CLI and the manual for your installed version, with no network and no model. Run a command in a floating terminal, open the manual at the matching section, or chat with the local GPU model about anything. When Omarchy can't do something, Build it hands the feature to Rix or your coding agent as a plugin or an omarchy.fans cloud web app.",
+  "description": "Help for Omarchy that answers and acts, on your own GPU. • Search your live keybindings, omarchy CLI and manual as you type • Run a command safely in one click • Open the manual at the right heading • Chat with a local model about Omarchy or anything else • Build it: turn a missing feature into a plugin or an omarchy.fans cloud web app with Rix or your coding agent",
   "kinds": [
     "panel",
     "bar-widget"

@@ -5,7 +5,7 @@
 <p align="center">
   <b>Offline help for <a href="https://omarchy.org">Omarchy</a> that acts, not just answers.</b><br>
   Search your keybindings, the <code>omarchy</code> CLI and the manual as you type. Run the command. Open the manual at the right heading.
-  Chat with a model that lives on your own GPU. Nothing leaves your machine.
+  Chat with a model that lives on your own GPU. Search and chat never leave your machine.
 </p>
 
 <p align="center">
@@ -13,6 +13,17 @@
 </p>
 
 ---
+
+## Features
+
+- **Search as you type.** Your live keybindings, the `omarchy` CLI and the manual for your installed version, with no network and no model.
+- **Run it safely.** One click runs a known `omarchy` command. Anything else opens on an editable prompt, and risky commands like `sudo` or `rm -rf` are refused.
+- **The manual, at the right heading.** Open any result in a floating terminal, scrolled to the section.
+- **Chat about anything.** A local model on your GPU answers Omarchy questions from the manual, and everything else from its own knowledge.
+- **Build what's missing.** When Omarchy can't do something, *Build it* turns it into an Omarchy plugin or an omarchy.fans cloud web app, built by Rix, Hermes or your coding agent.
+- **Do it.** A short lightning scene plays before the hand-off. Click to skip.
+- **Follows your theme.** Colours and fonts come from the active Omarchy theme.
+- **Easy to remove.** `uninstall.sh` removes exactly what `install.sh` added.
 
 ## What it does
 
