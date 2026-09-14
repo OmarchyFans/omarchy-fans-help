@@ -3,6 +3,11 @@
 The help window reads the newest sections of this file to tell you what changed
 when an update is available. Keep one short line per bullet.
 
+## 0.3.2
+
+- After Later, a newer release still shows its update banner
+- The Finish update banner no longer appears on unrelated helper errors
+
 ## 0.3.1
 
 - The window tells you when a new version is out, shows what changed, and updates in one click

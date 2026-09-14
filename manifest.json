@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.modpunk.omarchy-help",
   "name": "Omarchy Help",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "author": "modpunk",
   "license": "MIT",
   "description": "• Local AI agent: Qwen3.8-4B-Distill runs privately on your own GPU • Instant search of your keybindings, omarchy commands and manual • One-click commands, with risky ones refused • Opens the manual at the right heading • Chat about Omarchy or anything else • Build it: turns a missing feature into a plugin or web app with Rix or your coding agent • Tells you when an update is ready",
