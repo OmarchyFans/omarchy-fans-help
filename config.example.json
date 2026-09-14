@@ -7,5 +7,6 @@
   "max_tokens": 400,
   "general_max_tokens": 900,
   "build_client": "hermes",
-  "projects_dir": "~/Work"
+  "projects_dir": "~/Work",
+  "update_check": true
 }

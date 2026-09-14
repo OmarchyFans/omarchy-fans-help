@@ -46,6 +46,17 @@ Item {
   property int streamIndex: -1
   property string chatMode: ""          // "omarchy" | "general", from the daemon
 
+  // updates: what the CLI's --update-check reported for this window's version
+  readonly property string version: manifest && manifest.version ? manifest.version : "0.3.1"
+  readonly property string pluginDir: Quickshell.env("HOME") + "/.config/omarchy/plugins/" + pluginId
+  property var updateInfo: null
+  property bool updateHidden: false
+  property string updateOut: ""
+  readonly property bool updateAvailable: !!updateInfo && updateInfo.update_available
+                                          && updateInfo.dismissed !== updateInfo.latest
+  readonly property bool updateMismatch: !!updateInfo && updateInfo.mismatch
+  readonly property bool updateBannerShown: !updateHidden && (updateAvailable || updateMismatch)
+
   // build state ("Build it"): the sheet, the scene, and the reply
   property bool buildOpen: false
   property bool buildBusy: false
@@ -80,6 +91,36 @@ Item {
     if (results.count === 0) rebuildEmpty()
     window.visible = true
     focusTimer.restart()
+    checkUpdates()
+  }
+
+  // ---- updates ------------------------------------------------------------
+
+  function checkUpdates() {
+    if (updateProc.running) return
+    updateOut = ""
+    updateProc.running = true
+  }
+  function onUpdateExit(code) {
+    var d = null
+    try { d = JSON.parse(updateOut) } catch (e) { d = null }
+    if (d) { updateInfo = d; return }
+    // A helper older than this window does not know --update-check: the
+    // plugin files were updated but install.sh was not re-run.
+    if (code !== 0) updateInfo = { mismatch: true, update_available: false, cli: "older",
+                                   panel: version, latest: null, notes: [], dismissed: "", legacy: true }
+  }
+  function runUpdate() {
+    updateHidden = true
+    if (updateInfo && updateInfo.legacy)
+      Quickshell.execDetached(["omarchy-launch-tui", "--app-id=TUI.float", pluginDir + "/install.sh"])
+    else
+      Quickshell.execDetached([agent, "--update-run", updateAvailable ? "all" : "install"])
+    flash("Opened the updater in a terminal")
+  }
+  function dismissUpdate() {
+    updateHidden = true
+    if (updateAvailable && updateInfo.latest) Quickshell.execDetached([agent, "--update-dismiss", updateInfo.latest])
   }
   function close() { closingFromHost = true; window.visible = false; closingFromHost = false }
   function requestClose() {
@@ -414,6 +455,12 @@ Item {
   }
 
   Process {
+    id: updateProc
+    command: [root.agent, "--update-check", root.version]
+    stdout: SplitParser { splitMarker: "\n"; onRead: function(line) { root.updateOut += line } }
+    onExited: function(code) { root.onUpdateExit(code) }
+  }
+  Process {
     id: searchProc
     command: [root.agent, "--search-daemon"]
     running: window.visible
@@ -547,11 +594,88 @@ Item {
           }
         }
 
+        // ---- update banner ----
+        Rectangle {
+          id: updateBanner
+          width: parent.width
+          visible: root.updateBannerShown
+          height: visible ? updateCol.implicitHeight + Style.space(14) : 0
+          radius: Style.space(6)
+          color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.08)
+          border.width: 1
+          border.color: root.accent
+          Row {
+            anchors.fill: parent
+            anchors.margins: Style.space(7)
+            spacing: Style.space(8)
+            Column {
+              id: updateCol
+              width: parent.width - updateButtons.width - parent.spacing
+              spacing: Style.space(2)
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: root.updateAvailable
+                      ? "Omarchy Help " + root.updateInfo.latest + " is available (you have " + root.version + ")"
+                      : "Finish updating Omarchy Help: the window is " + root.version + ", its helpers are " + (root.updateInfo ? root.updateInfo.cli : "")
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
+                wrapMode: Text.Wrap
+              }
+              Repeater {
+                model: root.updateAvailable ? root.updateInfo.notes.slice(0, 4) : []
+                delegate: Text {
+                  required property var modelData
+                  width: updateCol.width
+                  textFormat: Text.PlainText
+                  text: "•  " + modelData
+                  color: root.foreground
+                  opacity: 0.8
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.Wrap
+                }
+              }
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: root.updateAvailable
+                      ? "Update opens a terminal: omarchy plugin update shows the changes and asks, then install.sh updates the helpers."
+                      : "Run install.sh once so the command-line helpers match. It asks before changing anything."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.Wrap
+              }
+            }
+            Row {
+              id: updateButtons
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(4)
+              Button {
+                text: root.updateAvailable ? "Update…" : "Finish update…"
+                bordered: true; fontSize: Style.font.caption
+                foreground: root.accent; fontFamily: root.fontFamily
+                onClicked: root.runUpdate()
+              }
+              Button {
+                text: "Later"
+                bordered: true; fontSize: Style.font.caption
+                foreground: root.foreground; fontFamily: root.fontFamily
+                onClicked: root.dismissUpdate()
+              }
+            }
+          }
+        }
+
         // ---- body: results, or the chat transcript ----
         Item {
           width: parent.width
           height: parent.height - inputBox.height - root.footerHeight - root.contentSpacing * 2
                   - (root.mode === "chat" ? chatActions.height + root.contentSpacing : 0)
+                  - (updateBanner.visible ? updateBanner.height + root.contentSpacing : 0)
 
           ListView {
             id: resultList

@@ -3,9 +3,9 @@
 </p>
 
 <p align="center">
-  <b>Offline help for <a href="https://omarchy.org">Omarchy</a> that acts, not just answers.</b><br>
+  <b>Help for <a href="https://omarchy.org">Omarchy</a> with a local AI agent that acts, not just answers.</b><br>
   Search your keybindings, the <code>omarchy</code> CLI and the manual as you type. Run the command. Open the manual at the right heading.
-  Chat with a model that lives on your own GPU. Search and chat never leave your machine.
+  Chat with Qwen3.8-4B-Distill running on your own GPU. Search and chat never leave your machine.
 </p>
 
 <p align="center">
@@ -16,14 +16,15 @@
 
 ## Features
 
+- **A local AI agent.** Chat runs [Qwen3.8-4B-Distill](https://huggingface.co/empero-ai/Qwen3.8-4B-Distill-GGUF) (Q4_K_M, 2.6 GB) on your own GPU through llama.cpp. `install.sh` offers to download it, pinned and checksum-verified.
 - **Search as you type.** Your live keybindings, the `omarchy` CLI and the manual for your installed version, with no network and no model.
 - **Run it safely.** One click runs a known `omarchy` command. Anything else opens on an editable prompt, and risky commands like `sudo` or `rm -rf` are refused.
 - **The manual, at the right heading.** Open any result in a floating terminal, scrolled to the section.
-- **Chat about anything.** A local model on your GPU answers Omarchy questions from the manual, and everything else from its own knowledge.
+- **Chat about anything.** Omarchy questions are answered from the manual, everything else from the model's own knowledge.
 - **Build what's missing.** When Omarchy can't do something, *Build it* turns it into an Omarchy plugin or an omarchy.fans cloud web app, built by Rix, Hermes or your coding agent.
-- **Do it.** A short lightning scene plays before the hand-off. Click to skip.
-- **Follows your theme.** Colours and fonts come from the active Omarchy theme.
-- **Easy to remove.** `uninstall.sh` removes exactly what `install.sh` added.
+- **Knows when it's out of date.** The window shows when a new version is out and what changed, and *Update…* walks you through it.
+- **Do it.** A short lightning scene plays before a build hand-off. Click to skip.
+- **Follows your theme, and removes cleanly.** Colours come from the active Omarchy theme; `uninstall.sh` removes exactly what `install.sh` added.
 
 ## What it does
 
@@ -157,7 +158,7 @@ instantly, light themes included.
 ```sh
 omarchy plugin add https://github.com/OmarchyFans/omarchy-fans-help
 omarchy plugin enable io.github.modpunk.omarchy-help
-~/.config/omarchy/plugins/io.github.modpunk.omarchy-help/install.sh   # asks first; CLI helpers, keybinding, float rule
+~/.config/omarchy/plugins/io.github.modpunk.omarchy-help/install.sh   # asks first; CLI helpers, keybinding, float rule, local model
 omarchy-local-agent-index                                              # build the search index (fetches the manual for your version)
 omarchy bar add io.github.modpunk.omarchy-help                         # optional bar button
 ```
@@ -167,8 +168,28 @@ omarchy bar add io.github.modpunk.omarchy-help                         # optiona
 appends a marked SUPER + CTRL + SHIFT + L keybinding to `bindings.lua` and a
 marked float rule to `looknfeel.lua` (backups kept beside them), installs the
 post-update hook that rebuilds the index, and adds the llama-server user unit
-and a config file only when none exist. Nothing else in your configuration is
-modified.
+and a config file only when none exist. If the local model is missing it offers
+to download Qwen3.8-4B-Distill and start the service (`--yes` skips that large
+download; add `--with-model` to include it). Nothing else in your configuration
+is modified.
+
+### Updates
+
+About once every six hours, when the window opens, it fetches this repository's
+`manifest.json` (one small HTTPS request, no personal data). If a newer version
+is out, a banner shows what changed, from `CHANGELOG.md`. *Update…* opens a
+terminal that runs `omarchy plugin update` (it shows the diff and asks), then
+`install.sh` (asks again), then offers to restart the shell. *Later* hides that
+version. If the window and its command-line helpers ever disagree, for example
+after a manual `omarchy plugin update`, the banner offers *Finish update…*,
+which runs `install.sh`. Set `"update_check": false` in
+`~/.config/omarchy-local-agent/config.json` to turn the check off. By hand:
+
+```sh
+omarchy plugin update io.github.modpunk.omarchy-help
+~/.config/omarchy/plugins/io.github.modpunk.omarchy-help/install.sh
+omarchy restart shell
+```
 
 ### Dependencies
 
@@ -197,7 +218,8 @@ Search, run, and open need only what Omarchy ships: `python3`, `sqlite3`,
 The model runs on `127.0.0.1:8080` only and the unit is hardened
 (`ProtectSystem=strict`, home read-only except its own data directory). No
 network is used at query time; the indexer fetches the manual once from the
-official Omarchy repository at your installed version's tag.
+official Omarchy repository at your installed version's tag, and the update
+check reads this repository's manifest a few times a day.
 
 ## Removal
 
@@ -236,6 +258,8 @@ omarchy-local-agent --run 'omarchy theme set <name>'  # terminal with the comman
 omarchy-local-agent --check 'sudo pacman -Syu'        # policy verdict and read/write preview
 omarchy-local-agent --build-options                   # what Build it can offer, and where each choice runs
 omarchy-local-agent --build request.json              # one build request: {target, via, feature, brief}
+omarchy-local-agent --update-check                    # is a newer version published? (JSON)
+omarchy-local-agent --update-run                      # terminal: plugin update, install.sh, shell restart
 ```
 
 `--search-daemon` and `--chat-daemon` are the JSON-lines interfaces the window

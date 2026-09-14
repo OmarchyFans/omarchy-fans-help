@@ -1403,6 +1403,153 @@ def run_command(cmd, print_only=False):
 
 
 # --------------------------------------------------------------------------
+# updates: tell the user when a newer version is published, and help finish it
+# --------------------------------------------------------------------------
+#
+# The check is one small HTTPS GET of the published manifest (and the changelog
+# when there is something new), cached so it runs at most a few times a day.
+# `"update_check": false` in config.json turns it off. Nothing is installed
+# without the user: the Update button opens a terminal where `omarchy plugin
+# update` shows its diff and asks, and install.sh asks again.
+
+VERSION = "0.3.1"
+PLUGIN_ID = "io.github.modpunk.omarchy-help"
+PLUGIN_DIR = os.path.join(HOME, ".config/omarchy/plugins", PLUGIN_ID)
+REPO_URL = "https://github.com/OmarchyFans/omarchy-fans-help"
+RAW_URL = "https://raw.githubusercontent.com/OmarchyFans/omarchy-fans-help/main"
+UPDATE_CACHE = os.path.join(HOME, ".cache/omarchy-local-agent/update-check.json")
+UPDATE_TTL = 6 * 3600
+
+
+def version_tuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", str(v or ""))[:3]) or (0,)
+
+
+def _http_get(url, timeout=5, limit=200_000):
+    req = urllib.request.Request(url, headers={"User-Agent": f"omarchy-help/{VERSION}"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read(limit).decode("utf-8", "replace")
+
+
+def changelog_notes(text, installed, latest, limit=6):
+    """Bullets from CHANGELOG.md sections newer than `installed`, newest first."""
+    notes, keep = [], False
+    for line in text.splitlines():
+        m = re.match(r"^##\s+v?(\d+\.\d+(?:\.\d+)?)", line)
+        if m:
+            v = version_tuple(m.group(1))
+            keep = version_tuple(installed) < v <= version_tuple(latest)
+            continue
+        if keep and re.match(r"^\s*[-*]\s+", line):
+            notes.append(re.sub(r"^\s*[-*]\s+", "", line).strip())
+    return notes[:limit]
+
+
+def _read_cache():
+    try:
+        with open(UPDATE_CACHE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_cache(data):
+    try:
+        os.makedirs(os.path.dirname(UPDATE_CACHE), exist_ok=True)
+        with open(UPDATE_CACHE, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+    except OSError:
+        pass
+
+
+def update_status(panel_version, force=False):
+    cfg = load_config()
+    cache = _read_cache()
+    installed = panel_version or VERSION
+    out = {"panel": installed, "cli": VERSION, "latest": None, "update_available": False,
+           "notes": [], "mismatch": bool(panel_version) and
+           version_tuple(panel_version) != version_tuple(VERSION),
+           "git_managed": os.path.isdir(os.path.join(PLUGIN_DIR, ".git")),
+           "dismissed": cache.get("dismissed", ""), "checked": cache.get("checked", 0),
+           "enabled": cfg.get("update_check", True) is not False}
+    if out["enabled"]:
+        fresh = time.time() - cache.get("checked", 0) < UPDATE_TTL
+        latest = cache.get("latest") if fresh and not force else None
+        if latest is None:
+            try:
+                latest = json.loads(_http_get(f"{RAW_URL}/manifest.json"))["version"]
+                cache.update(checked=time.time(), latest=latest, notes_for="", notes=[])
+            except (OSError, ValueError, KeyError, urllib.error.URLError):
+                latest = cache.get("latest")          # offline: last known answer
+        out["latest"] = latest
+        newest_known = max(version_tuple(installed), version_tuple(VERSION))
+        if latest and version_tuple(latest) > newest_known:
+            out["update_available"] = True
+            key = f"{installed}>{latest}"
+            if cache.get("notes_for") != key:
+                try:
+                    cache["notes"] = changelog_notes(_http_get(f"{RAW_URL}/CHANGELOG.md"),
+                                                     installed, latest)
+                    cache["notes_for"] = key
+                except (OSError, urllib.error.URLError):
+                    cache.setdefault("notes", [])
+            out["notes"] = cache.get("notes", [])
+        _write_cache(cache)
+        out["checked"] = cache.get("checked", 0)
+    return out
+
+
+def update_dismiss(version):
+    cache = _read_cache()
+    cache["dismissed"] = str(version)
+    _write_cache(cache)
+    return 0
+
+
+UPDATE_SCRIPT = r'''
+set -u
+id=io.github.modpunk.omarchy-help
+dir="$HOME/.config/omarchy/plugins/$id"
+echo "Omarchy Help update"
+echo
+if [[ ${OH_STEP:-all} == all ]]; then
+  if [[ -d $dir/.git ]]; then
+    echo "1/3  omarchy plugin update $id   (shows the changes and asks first)"
+    omarchy plugin update "$id" || { echo; read -rp "The plugin update did not finish. Press Enter to close "; exit 1; }
+  else
+    echo "This copy was not installed with 'omarchy plugin add', so it cannot update itself."
+    echo "Reinstall it from the marketplace:"
+    echo "  omarchy plugin remove $id && omarchy plugin add $OH_REPO --enable"
+    echo; read -rp "Press Enter to close "; exit 1
+  fi
+  echo
+fi
+echo "2/3  install.sh   (updates the command-line helpers; asks first)"
+"$dir/install.sh" || { echo; read -rp "install.sh did not finish. Press Enter to close "; exit 1; }
+echo
+read -rp "3/3  Restart the Omarchy shell now to load the new version? [Y/n] " ans
+if [[ ! $ans =~ ^[nN] ]]; then omarchy restart shell >/dev/null 2>&1 & fi
+echo "Done."
+sleep 2
+'''
+
+
+def update_run(step="all", print_only=False):
+    """Open a floating terminal that finishes the update. step=all runs
+    `omarchy plugin update` then install.sh; step=install only install.sh (the
+    plugin files are already new, the helpers are not)."""
+    if step not in ("all", "install"):
+        return 2
+    argv = ["omarchy-launch-tui", "--app-id=TUI.float", "env", f"OH_STEP={step}",
+            f"OH_REPO={REPO_URL}", "bash", "-c", UPDATE_SCRIPT]
+    if print_only:
+        print(json.dumps({"argv": argv}))
+        return 0
+    spawn(argv)
+    return 0
+
+
+# --------------------------------------------------------------------------
 # "Build it": hand a missing feature to Rix or a coding client
 # --------------------------------------------------------------------------
 #
@@ -1760,6 +1907,13 @@ def main():
     p.add_argument("--retrieve-only", action="store_true",
                    help="print the retrieval decision without running the model")
     p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("--version", action="version", version=f"omarchy-local-agent {VERSION}")
+    p.add_argument("--update-check", nargs="?", const="", metavar="PANEL_VERSION",
+                   help="check for a newer published version; prints JSON")
+    p.add_argument("--force", action="store_true", help="with --update-check: ignore the cache")
+    p.add_argument("--update-dismiss", metavar="VERSION", help=argparse.SUPPRESS)
+    p.add_argument("--update-run", nargs="?", const="all", choices=("all", "install"),
+                   help="open a terminal that updates the plugin and its helpers")
     p.add_argument("--build-options", action="store_true",
                    help="print what the Build card can offer, as JSON")
     p.add_argument("--build", metavar="REQUEST_JSON",
@@ -1772,6 +1926,13 @@ def main():
 
     if args.popup:
         sys.exit(popup())
+    if args.update_check is not None:
+        print(json.dumps(update_status(args.update_check, force=args.force)))
+        return
+    if args.update_dismiss:
+        sys.exit(update_dismiss(args.update_dismiss))
+    if args.update_run:
+        sys.exit(update_run(args.update_run, print_only=args.print))
     if args.build_session:
         sys.exit(build_session(*args.build_session))
     if args.build_options:

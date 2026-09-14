@@ -15,6 +15,7 @@ This will:
   - append a float rule for the "Omarchy Help" window to ~/.config/hypr/looknfeel.lua
   - install the post-update hook that rebuilds the index
   - add the llama-server user unit and a config file only if they do not exist yet
+  - offer to download the local AI model (Qwen3.8-4B-Distill, 2.6 GB) if it is missing
 Every appended line carries the marker $MARK; uninstall.sh removes them.
 Backups of edited files are kept next to them.
 MSG
@@ -65,6 +66,31 @@ else
 o.window({ class = "^org.quickshell$", title = "^Omarchy Help$" }, { float = true, center = true, size = { 760, 580 }, opacity = "1 1" })
 RULE
   echo "added window rule to $LF"
+fi
+
+# The local AI agent: Qwen3.8-4B-Distill on your own GPU. Large, so it is
+# offered, never assumed: --yes alone does not download it; --with-model does.
+MODEL="$HOME/.local/share/omarchy-local-agent/models/Qwen3.8-4B-Distill-Q4_K_M.gguf"
+if [[ ! -f $MODEL ]]; then
+  want=0
+  if [[ " $* " == *" --with-model "* ]]; then want=1
+  elif [[ ${1:-} != --yes && -t 0 ]]; then
+    echo
+    echo "Chat runs a local AI model, Qwen3.8-4B-Distill (Q4_K_M, 2.6 GB), on your GPU."
+    echo "It is downloaded from Hugging Face pinned to one revision and checked against its SHA-256."
+    read -rp "Download it now and start the local model service? [y/N] " ans
+    [[ $ans == [yY]* ]] && want=1
+  fi
+  if (( want )); then
+    if "$HERE/tools/fetch-models.sh"; then
+      command -v llama-server >/dev/null || echo "llama-server is missing: omarchy pkg add llama-cpp ggml-cpu ggml-cuda"
+      systemctl --user enable --now omarchy-local-agent 2>/dev/null && echo "local model service started"
+    else
+      echo "model download did not finish; rerun: $HERE/tools/fetch-models.sh"
+    fi
+  else
+    echo "Chat needs the local model. Later: $HERE/tools/fetch-models.sh && systemctl --user enable --now omarchy-local-agent"
+  fi
 fi
 
 command -v hyprctl >/dev/null && hyprctl reload >/dev/null 2>&1 || true
