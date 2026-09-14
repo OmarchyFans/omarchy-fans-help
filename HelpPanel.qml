@@ -47,15 +47,20 @@ Item {
   property string chatMode: ""          // "omarchy" | "general", from the daemon
 
   // updates: what the CLI's --update-check reported for this window's version
-  readonly property string version: manifest && manifest.version ? manifest.version : "0.3.1"
+  readonly property string version: manifest && manifest.version ? manifest.version : "0.3.2"
   readonly property string pluginDir: Quickshell.env("HOME") + "/.config/omarchy/plugins/" + pluginId
   property var updateInfo: null
-  property bool updateHidden: false
   property string updateOut: ""
+  property string updateErr: ""
   readonly property bool updateAvailable: !!updateInfo && updateInfo.update_available
                                           && updateInfo.dismissed !== updateInfo.latest
   readonly property bool updateMismatch: !!updateInfo && updateInfo.mismatch
-  readonly property bool updateBannerShown: !updateHidden && (updateAvailable || updateMismatch)
+  // What the banner is about: the offered version, or "mismatch". Hiding is
+  // keyed to it, so a newer release shows again after "Later" on an older one.
+  readonly property string updateKey: updateAvailable ? String(updateInfo.latest)
+                                      : updateMismatch ? "mismatch" : ""
+  property string updateHiddenKey: ""
+  readonly property bool updateBannerShown: updateKey !== "" && updateKey !== updateHiddenKey
 
   // build state ("Build it"): the sheet, the scene, and the reply
   property bool buildOpen: false
@@ -99,6 +104,7 @@ Item {
   function checkUpdates() {
     if (updateProc.running) return
     updateOut = ""
+    updateErr = ""
     updateProc.running = true
   }
   function onUpdateExit(code) {
@@ -106,12 +112,14 @@ Item {
     try { d = JSON.parse(updateOut) } catch (e) { d = null }
     if (d) { updateInfo = d; return }
     // A helper older than this window does not know --update-check: the
-    // plugin files were updated but install.sh was not re-run.
-    if (code !== 0) updateInfo = { mismatch: true, update_available: false, cli: "older",
+    // plugin files were updated but install.sh was not re-run. Only argparse's
+    // own complaint counts; any other failure (a file mid-update, a missing
+    // module) is not evidence of an old helper, so it shows nothing.
+    if (code !== 0 && /unrecognized arguments|invalid choice/.test(updateErr)) updateInfo = { mismatch: true, update_available: false, cli: "older",
                                    panel: version, latest: null, notes: [], dismissed: "", legacy: true }
   }
   function runUpdate() {
-    updateHidden = true
+    updateHiddenKey = updateKey
     if (updateInfo && updateInfo.legacy)
       Quickshell.execDetached(["omarchy-launch-tui", "--app-id=TUI.float", pluginDir + "/install.sh"])
     else
@@ -119,7 +127,7 @@ Item {
     flash("Opened the updater in a terminal")
   }
   function dismissUpdate() {
-    updateHidden = true
+    updateHiddenKey = updateKey
     if (updateAvailable && updateInfo.latest) Quickshell.execDetached([agent, "--update-dismiss", updateInfo.latest])
   }
   function close() { closingFromHost = true; window.visible = false; closingFromHost = false }
@@ -458,6 +466,7 @@ Item {
     id: updateProc
     command: [root.agent, "--update-check", root.version]
     stdout: SplitParser { splitMarker: "\n"; onRead: function(line) { root.updateOut += line } }
+    stderr: SplitParser { splitMarker: "\n"; onRead: function(line) { root.updateErr += line + "\n" } }
     onExited: function(code) { root.onUpdateExit(code) }
   }
   Process {
